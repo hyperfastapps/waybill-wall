@@ -1,15 +1,14 @@
-import { FirebaseError, getApp, getApps, initializeApp } from "firebase/app";
+import { FirebaseError, getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
 import {
   GoogleAuthProvider,
-  browserLocalPersistence,
   connectAuthEmulator,
   deleteUser,
   getAuth,
   getRedirectResult,
+  initializeAuth,
   linkWithRedirect,
   onAuthStateChanged,
   reauthenticateWithRedirect,
-  setPersistence,
   signInAnonymously,
   signInWithCredential,
   signInWithRedirect,
@@ -21,20 +20,36 @@ import {
   connectFirestoreEmulator,
   deleteDoc,
   doc,
-  getDoc,
   getFirestore,
   initializeFirestore,
   memoryLocalCache,
   persistentLocalCache,
   persistentMultipleTabManager,
-  serverTimestamp,
-  setDoc,
   type Firestore,
 } from "firebase/firestore";
-import { isCarrierId, isTrackingNumber } from "@/lib/carriers";
+import { commitReconciledWall } from "@/lib/commit-wall";
+import { wallAuthInitOptions } from "@/lib/firebase-auth-persistence";
 import { parseEmulatorHost, type FirebaseClientConfig } from "@/lib/firebase-config";
-import { mergeSlips, sameSlipContent, type MergeResult } from "@/lib/wall-merge";
-import { normalizeNumber, type Slip } from "@/lib/wall-codec";
+import { syncedTrackingKeys, type MergeResult } from "@/lib/wall-merge";
+import { type Slip } from "@/lib/wall-codec";
+import {
+  inFlightMayWrite,
+  rollbackStaleWrite,
+  type AbandonReason,
+} from "@/lib/wall-sync-plan";
+
+export function openWallAuth(app: FirebaseApp): Auth {
+  try {
+    return initializeAuth(app, wallAuthInitOptions());
+  } catch (error) {
+    const code =
+      typeof error === "object" && error && "code" in error
+        ? String((error as { code: unknown }).code)
+        : "";
+    if (code === "auth/already-initialized") return getAuth(app);
+    throw error;
+  }
+}
 
 const PENDING_SYNC = "waybill-pending-sync";
 const PENDING_DELETE = "waybill-pending-delete";
@@ -57,7 +72,9 @@ export type FirebaseSession = {
   current(): WallUser | null;
   subscribe(listener: (user: WallUser | null) => void): () => void;
   isCreatingUser(): boolean;
-  push(readSlips: () => Slip[], createIdentity: boolean): Promise<void>;
+  /** Cancel lazy sign-up and any save already running. Clears the pending-sync flag. */
+  abandonWrites(reason: AbandonReason): void;
+  push(readSlips: () => Slip[], createIdentity: boolean): Promise<MergeResult | null>;
   merge(mode: "local-wins" | "account-wins", localSlips: Slip[]): Promise<MergeResult | null>;
   linkGoogle(): Promise<void>;
   signOut(): Promise<void>;
@@ -96,7 +113,7 @@ export function loadFirebaseSession(
  */
 async function createSession(config: FirebaseClientConfig): Promise<FirebaseSession> {
   const app = getApps().length > 0 ? getApp() : initializeApp(config.web);
-  const auth = getAuth(app);
+  const auth = openWallAuth(app);
   const authHost = parseEmulatorHost(config.authEmulatorHost);
   if (authHost) {
     try {
@@ -116,7 +133,6 @@ async function createSession(config: FirebaseClientConfig): Promise<FirebaseSess
       /* already connected */
     }
   }
-  await setPersistence(auth, browserLocalPersistence);
   const startup = await settleRedirect(auth, db);
   return bindSession(auth, db, startup);
 }
@@ -136,8 +152,10 @@ function openFirestore(app: ReturnType<typeof getApp>, emulator: boolean): Fires
 
 function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): FirebaseSession {
   let epoch = 0;
+  let writeGeneration = 0;
   let creatingUser = false;
   let anonInflight: Promise<User> | null = null;
+  const haltedReasons = new Map<number, AbandonReason>();
 
   function ensureAnonymous(): Promise<User> {
     if (auth.currentUser) return Promise.resolve(auth.currentUser);
@@ -149,17 +167,43 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
     return anonInflight;
   }
 
-  async function readWall(uid: string): Promise<Slip[]> {
-    const snap = await getDoc(doc(db, "walls", uid));
-    if (!snap.exists()) return [];
-    return parseStoredSlips(snap.data()?.slips);
+  function abandonWrites(reason: AbandonReason) {
+    haltedReasons.set(writeGeneration, reason);
+    writeGeneration += 1;
+    epoch += 1;
+    creatingUser = false;
+    storageRemove(PENDING_SYNC);
   }
 
-  async function writeWall(uid: string, slips: Slip[]): Promise<void> {
-    await setDoc(doc(db, "walls", uid), {
-      slips: toStored(slips),
-      updatedAt: serverTimestamp(),
+  function stillCurrent(token: number, generation: number) {
+    return token === epoch && inFlightMayWrite(generation, writeGeneration);
+  }
+
+  async function undoStaleWrite(
+    user: User,
+    generation: number,
+    createdUserHere: boolean,
+    wrote: boolean,
+  ) {
+    const decision = rollbackStaleWrite({
+      reason: haltedReasons.get(generation) ?? null,
+      createdUserHere,
+      wrote,
     });
+    if (decision.undoWall || decision.undoUser) {
+      try {
+        await deleteDoc(doc(db, "walls", user.uid));
+      } catch {
+        /* already gone, or the auth user is already deleted */
+      }
+    }
+    if (decision.undoUser) {
+      try {
+        await deleteUser(user);
+      } catch {
+        /* delete already removed this account */
+      }
+    }
   }
 
   return {
@@ -169,35 +213,68 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
       return onAuthStateChanged(auth, (user) => listener(snapshot(user)));
     },
     isCreatingUser: () => creatingUser,
+    abandonWrites,
     async push(readSlips, createIdentity) {
+      const generation = writeGeneration;
+      if (!inFlightMayWrite(generation, writeGeneration)) return null;
       if (createIdentity) creatingUser = true;
       const token = ++epoch;
+      let createdHere = false;
+      let wrote = false;
+      let user = auth.currentUser;
       try {
-        let user = auth.currentUser;
+        if (!stillCurrent(token, generation)) return null;
         if (!user && (createIdentity || creatingUser)) {
           user = await ensureAnonymous();
+          createdHere = true;
         }
-        if (!user || token !== epoch) return;
-        await writeWall(user.uid, readSlips());
-        if (token === epoch) creatingUser = false;
+        if (!user || !stillCurrent(token, generation)) {
+          if (createdHere && user) await undoStaleWrite(user, generation, true, false);
+          return null;
+        }
+        const merged = await commitReconciledWall(
+          db,
+          user.uid,
+          readSlips(),
+          "local-wins",
+          readSyncedKeys(),
+        );
+        wrote = true;
+        if (!stillCurrent(token, generation)) {
+          await undoStaleWrite(user, generation, createdHere, true);
+          return null;
+        }
+        noteSynced(merged.slips);
+        creatingUser = false;
+        return merged;
       } catch (error) {
-        if (token === epoch) creatingUser = false;
-        throw error;
+        if (stillCurrent(token, generation)) {
+          creatingUser = false;
+          throw error;
+        }
+        if (user && (createdHere || wrote)) {
+          await undoStaleWrite(user, generation, createdHere, wrote);
+        }
+        return null;
       }
     },
     async merge(mode, localSlips) {
+      const generation = writeGeneration;
       const token = epoch;
       const user = auth.currentUser;
-      if (!user) return null;
-      const remote = await readWall(user.uid);
-      if (token !== epoch) return null;
-      const merged =
-        mode === "local-wins" ? mergeSlips(localSlips, remote) : mergeSlips(remote, localSlips);
-      if (!sameSlipContent(merged.slips, remote)) {
-        if (token !== epoch) return null;
-        await writeWall(user.uid, merged.slips);
+      if (!user || !inFlightMayWrite(generation, writeGeneration)) return null;
+      const merged = await commitReconciledWall(
+        db,
+        user.uid,
+        localSlips,
+        mode,
+        mode === "local-wins" ? readSyncedKeys() : null,
+      );
+      if (!stillCurrent(token, generation)) {
+        await undoStaleWrite(user, generation, false, true);
+        return null;
       }
-      if (token !== epoch) return null;
+      noteSynced(merged.slips);
       return merged;
     },
     async linkGoogle() {
@@ -215,12 +292,18 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
       storageRemove(PENDING_SYNC);
     },
     async signOut() {
+      abandonWrites("sign-out");
       await firebaseSignOut(auth);
     },
     async deleteAccount() {
+      abandonWrites("delete");
       const user = auth.currentUser;
-      if (!user) return "deleted";
+      if (!user) {
+        clearSyncedKeys();
+        return "deleted";
+      }
       await deleteDoc(doc(db, "walls", user.uid));
+      clearSyncedKeys();
       try {
         await deleteUser(user);
         return "deleted";
@@ -244,6 +327,7 @@ async function settleRedirect(auth: Auth, db: Firestore): Promise<SessionStartup
       storageRemove(PENDING_DELETE);
       storageRemove(PENDING_SYNC);
       await deleteDoc(doc(db, "walls", auth.currentUser.uid));
+      clearSyncedKeys();
       await deleteUser(auth.currentUser);
       return {
         slips: [],
@@ -255,11 +339,14 @@ async function settleRedirect(auth: Auth, db: Firestore): Promise<SessionStartup
     const pending = storageGet(PENDING_SYNC) === "1";
     storageRemove(PENDING_SYNC);
     if ((result?.user || pending) && auth.currentUser) {
-      const remote = await readWallDoc(db, auth.currentUser.uid);
-      const merged = mergeSlips(remote, readLocal());
-      if (!sameSlipContent(merged.slips, remote)) {
-        await writeWallDoc(db, auth.currentUser.uid, merged.slips);
-      }
+      const merged = await commitReconciledWall(
+        db,
+        auth.currentUser.uid,
+        readLocal(),
+        "account-wins",
+        null,
+      );
+      noteSynced(merged.slips);
       return {
         slips: merged.slips,
         notice: merged.dropped.length
@@ -302,9 +389,8 @@ async function adoptExistingGoogle(
     }
   }
   const signed = await signInWithCredential(auth, credential);
-  const remote = await readWallDoc(db, signed.user.uid);
-  const merged = mergeSlips(remote, anonSlips);
-  await writeWallDoc(db, signed.user.uid, merged.slips);
+  const merged = await commitReconciledWall(db, signed.user.uid, anonSlips, "account-wins", null);
+  noteSynced(merged.slips);
   return {
     slips: merged.slips,
     notice: merged.dropped.length
@@ -321,63 +407,34 @@ function googleProvider(): GoogleAuthProvider {
   return provider;
 }
 
-async function readWallDoc(db: Firestore, uid: string): Promise<Slip[]> {
-  const snap = await getDoc(doc(db, "walls", uid));
-  if (!snap.exists()) return [];
-  return parseStoredSlips(snap.data()?.slips);
-}
+const SYNCED_KEYS = "waybill-wall-synced-v1";
 
-async function writeWallDoc(db: Firestore, uid: string, slips: Slip[]): Promise<void> {
-  await setDoc(doc(db, "walls", uid), {
-    slips: toStored(slips),
-    updatedAt: serverTimestamp(),
-  });
-}
-
-function toStored(slips: Slip[]) {
-  const stored: Array<{
-    id: string;
-    number: string;
-    nickname: string;
-    caption: string;
-    carrier: Slip["carrier"];
-  }> = [];
-  for (const slip of slips) {
-    const number = normalizeNumber(slip.number);
-    if (!isTrackingNumber(number) || !isCarrierId(slip.carrier)) continue;
-    const id = slip.id.trim().slice(0, 80);
-    if (!id) continue;
-    stored.push({
-      id,
-      number,
-      nickname: slip.nickname.slice(0, 40),
-      caption: slip.caption.slice(0, 140),
-      carrier: slip.carrier,
-    });
-    if (stored.length === 12) break;
+function readSyncedKeys(): string[] | null {
+  try {
+    const raw = localStorage.getItem(SYNCED_KEYS);
+    if (raw == null) return null;
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return null;
+    return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+  } catch {
+    return null;
   }
-  return stored;
 }
 
-function parseStoredSlips(value: unknown): Slip[] {
-  if (!Array.isArray(value)) return [];
-  const slips: Slip[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const record = item as Record<string, unknown>;
-    const number = normalizeNumber(typeof record.number === "string" ? record.number : "");
-    const carrier = typeof record.carrier === "string" ? record.carrier : "";
-    const id = typeof record.id === "string" ? record.id.trim() : "";
-    if (!id || !isTrackingNumber(number) || !isCarrierId(carrier)) continue;
-    slips.push({
-      id: id.slice(0, 80),
-      number,
-      nickname: typeof record.nickname === "string" ? record.nickname.slice(0, 40) : "",
-      caption: typeof record.caption === "string" ? record.caption.slice(0, 140) : "",
-      carrier,
-    });
+function noteSynced(slips: Slip[]) {
+  try {
+    localStorage.setItem(SYNCED_KEYS, JSON.stringify(syncedTrackingKeys(slips)));
+  } catch {
+    /* private mode */
   }
-  return slips;
+}
+
+function clearSyncedKeys() {
+  try {
+    localStorage.removeItem(SYNCED_KEYS);
+  } catch {
+    /* private mode */
+  }
 }
 
 function snapshot(user: User | null): WallUser | null {

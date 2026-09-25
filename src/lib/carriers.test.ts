@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CARRIERS, guessCarrier, isCarrierId, trackUrl, type CarrierId } from "./carriers.ts";
+import {
+  CARRIERS,
+  guessCarrier,
+  isAmazonNumber,
+  isCarrierId,
+  trackUrl,
+  type CarrierId,
+} from "./carriers.ts";
 
 const samples: Array<[string, CarrierId]> = [
   ["9400111899223344556677", "usps"],
@@ -25,6 +32,9 @@ const samples: Array<[string, CarrierId]> = [
   ["1LSCZM300293DG8", "ontrac"],
   ["BN123456789012", "ontrac"],
   ["LS1234567890", "ontrac"],
+  ["TBA334894092403", "amazon"],
+  ["TBC123456789012", "amazon"],
+  ["TBM123456789012", "amazon"],
 ];
 
 describe("guessCarrier", () => {
@@ -36,6 +46,18 @@ describe("guessCarrier", () => {
 
   it("ignores spaces and letter case on classic OnTrac numbers", () => {
     assert.equal(guessCarrier("c 1103-1500 001879"), "ontrac");
+  });
+
+  it("reads the owner’s Amazon number with spaces, dashes, or lowercase", () => {
+    assert.equal(guessCarrier("tba334894092403"), "amazon");
+    assert.equal(guessCarrier("TBA 3348-9409 2403"), "amazon");
+    assert.equal(isAmazonNumber("TBA334894092403"), true);
+  });
+
+  it("does not treat a short TBA string as Amazon", () => {
+    assert.equal(isAmazonNumber("TBA12345678901"), false);
+    assert.notEqual(guessCarrier("TBA12345678901"), "amazon");
+    assert.equal(guessCarrier("T1234567890"), "ups");
   });
 });
 
@@ -60,11 +82,21 @@ describe("trackUrl", () => {
     assert.equal(url.hostname, "www.fedex.com");
     assert.equal(url.searchParams.get("trknbr"), "123456789012");
   });
+
+  it("links Amazon to the public tracking page for that number", () => {
+    const url = new URL(trackUrl("amazon", "TBA334894092403"));
+    assert.equal(url.origin + url.pathname, "https://track.amazon.com/tracking/TBA334894092403");
+  });
 });
 
 describe("shipper list", () => {
   it("includes OnTrac", () => {
     assert.equal(isCarrierId("ontrac"), true);
     assert.ok(CARRIERS.some((carrier) => carrier.id === "ontrac" && carrier.name === "OnTrac"));
+  });
+
+  it("includes Amazon", () => {
+    assert.equal(isCarrierId("amazon"), true);
+    assert.ok(CARRIERS.some((carrier) => carrier.id === "amazon" && carrier.name === "Amazon"));
   });
 });

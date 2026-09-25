@@ -67,14 +67,17 @@ export function PrivacyDetails() {
         wall, and opening it does not write your account.
       </p>
       <p>
-        Sign out leaves the slips on this phone and stops syncing. The next pin starts a new
-        anonymous saved wall. “Delete my data” deletes the Firestore wall and the Firebase user, and
-        clears the slips on this phone.
+        Signing out of an anonymous wall leaves that saved wall in Firestore. It cannot be opened
+        again unless it was saved to Google first. Signing out of a linked Google account leaves the
+        slips on this phone and stops syncing; that wall stays on the Google account. The next pin
+        starts a new anonymous saved wall. “Delete my data” deletes the Firestore wall and the
+        Firebase user, and clears the slips on this phone.
       </p>
       <p>
-        The app still does not sign into USPS, UPS, FedEx, DHL, HDX, or OnTrac. Opening a carrier
-        follows their site. If the server has FedEx credentials, checking a FedEx slip sends that
-        tracking number to FedEx’s Track API.
+        The app still does not sign into USPS, UPS, FedEx, DHL, HDX, OnTrac, or Amazon. An Amazon
+        slip opens Amazon’s public tracking page. Opening another carrier follows their site. If the
+        server has FedEx credentials, checking a FedEx slip sends that tracking number to FedEx’s
+        Track API.
       </p>
     </div>
   );
@@ -90,8 +93,9 @@ export function LocalPrivacyDetails() {
         Firestore, and no Firebase ID is created.
       </p>
       <p>
-        The app does not sign into USPS, UPS, FedEx, DHL, HDX, or OnTrac. If the server has FedEx
-        credentials, checking a FedEx slip sends that tracking number to FedEx’s Track API.
+        The app does not sign into USPS, UPS, FedEx, DHL, HDX, OnTrac, or Amazon. An Amazon slip
+        opens Amazon’s public tracking page. If the server has FedEx credentials, checking a FedEx
+        slip sends that tracking number to FedEx’s Track API.
       </p>
     </div>
   );

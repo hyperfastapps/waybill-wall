@@ -1,6 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FirebaseClientConfig } from "@/lib/firebase-config";
-import { planInitialMerge, planWallWrite } from "@/lib/wall-sync-plan";
+import {
+  classifySyncFailure,
+  haltSync,
+  mayCreateIdentity,
+  planInitialMerge,
+  planWallWrite,
+  resumeSyncOnRevision,
+  syncFailureNotice,
+  syncRetryDelayMs,
+  type AbandonReason,
+} from "@/lib/wall-sync-plan";
 import { sameSlipContent } from "@/lib/wall-merge";
 import type { Slip } from "@/lib/wall-codec";
 import type { FirebaseSession, WallUser } from "@/lib/firebase-session";
@@ -14,6 +24,8 @@ export type FirebaseWallController = {
   uid: string | null;
   busy: boolean;
   sync: SyncState;
+  /** Set while sync is "error". The slips on screen are unchanged. */
+  syncDetail: string | null;
   notice: { id: number; text: string } | null;
   linkGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -35,27 +47,121 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   slipsHolder.current = slips;
   const slipsRef = useRef(slips);
   slipsRef.current = slips;
+
+  function adoptSlips(next: Slip[]) {
+    if (sameSlipContent(next, slipsHolder.current)) return;
+    slipsHolder.current = next;
+    slipsRef.current = next;
+    onSlipsRef.current(next);
+  }
   const onSlipsRef = useRef(onSlips);
   onSlipsRef.current = onSlips;
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
   const createIdentityRef = useRef(createIdentity);
-  createIdentityRef.current = createIdentity;
+  const revisionSeen = useRef(revision);
+  const allowCreateRef = useRef(createIdentity);
+  const haltedRef = useRef(false);
+  const syncGeneration = useRef(0);
+  if (revisionSeen.current !== revision) {
+    revisionSeen.current = revision;
+    // Only a new pin (or adopting a share) may create an account after delete
+    // or sign-out. Clearing or removing a slip bumps revision too, and must
+    // leave the halt in place.
+    if (createIdentity) {
+      const resumed = resumeSyncOnRevision(
+        {
+          generation: syncGeneration.current,
+          allowCreate: allowCreateRef.current,
+          retryAttempt: 0,
+          halted: haltedRef.current,
+        },
+        true,
+      );
+      allowCreateRef.current = resumed.allowCreate;
+      haltedRef.current = resumed.halted;
+    }
+  }
+  if (!createIdentity) allowCreateRef.current = false;
+  createIdentityRef.current = mayCreateIdentity(createIdentity, allowCreateRef.current);
 
   const [user, setUser] = useState<WallUser | null>(null);
   const [busy, setBusy] = useState(false);
   const [sync, setSync] = useState<SyncState>(config ? "local" : "off");
+  const [syncDetail, setSyncDetail] = useState<string | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
   const [notice, setNotice] = useState<{ id: number; text: string } | null>(null);
   const noticeId = useRef(0);
   const sessionRef = useRef<FirebaseSession | null>(null);
   const appliedStartup = useRef(false);
   const pushChain = useRef(Promise.resolve());
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryAttempt = useRef(0);
+  const failureNoted = useRef(false);
 
-  function publishNotice(text: string | null) {
+  const publishNotice = useCallback((text: string | null) => {
     if (!text) return;
     noticeId.current += 1;
     setNotice({ id: noticeId.current, text });
-  }
+  }, []);
+
+  const clearRetry = useCallback(() => {
+    if (retryTimer.current != null) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+  }, []);
+
+  const noteFailure = useCallback(
+    (error: unknown) => {
+      const text = syncFailureNotice(classifySyncFailure(error));
+      setSync("error");
+      setSyncDetail(text);
+      if (failureNoted.current) return;
+      failureNoted.current = true;
+      publishNotice(text);
+    },
+    [publishNotice],
+  );
+
+  const markSaved = useCallback(() => {
+    retryAttempt.current = 0;
+    failureNoted.current = false;
+    clearRetry();
+    setSync("saved");
+    setSyncDetail(null);
+  }, [clearRetry]);
+
+  const stopSync = useCallback(
+    (reason: AbandonReason) => {
+      const halted = haltSync({
+        generation: syncGeneration.current,
+        allowCreate: allowCreateRef.current,
+        retryAttempt: retryAttempt.current,
+        halted: haltedRef.current,
+      });
+      syncGeneration.current = halted.generation;
+      allowCreateRef.current = halted.allowCreate;
+      retryAttempt.current = halted.retryAttempt;
+      haltedRef.current = halted.halted;
+      createIdentityRef.current = false;
+      failureNoted.current = false;
+      clearRetry();
+      sessionRef.current?.abandonWrites(reason);
+      setSync("local");
+      setSyncDetail(null);
+    },
+    [clearRetry],
+  );
+
+  const scheduleRetry = useCallback(() => {
+    clearRetry();
+    retryAttempt.current += 1;
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null;
+      setRetryTick((value) => value + 1);
+    }, syncRetryDelayMs(retryAttempt.current));
+  }, [clearRetry]);
 
   useEffect(() => {
     if (!config) return;
@@ -81,79 +187,119 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   useEffect(() => {
     if (!config || !ready || suspended) return;
     let cancel = false;
-    void load(config)
-      .then(async (session) => {
-        if (cancel || suspendedRef.current) return;
-        sessionRef.current = session;
-        const startup = session.startup;
-        if (startup.deleted) {
-          if (!appliedStartup.current) {
-            appliedStartup.current = true;
-            onSlipsRef.current([]);
-            publishNotice(startup.notice);
-          }
-          setSync("local");
-          return;
-        }
-        if (startup.merged) {
-          if (!appliedStartup.current) {
-            appliedStartup.current = true;
-            if (startup.slips && !sameSlipContent(startup.slips, slipsRef.current)) {
-              onSlipsRef.current(startup.slips);
+    const generation = syncGeneration.current;
+    pushChain.current = pushChain.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (cancel || suspendedRef.current || haltedRef.current) return;
+        if (generation !== syncGeneration.current) return;
+        try {
+          const session = await load(config);
+          if (cancel || suspendedRef.current || haltedRef.current) return;
+          if (generation !== syncGeneration.current) return;
+          sessionRef.current = session;
+          const startup = session.startup;
+          if (startup.deleted) {
+            if (!appliedStartup.current) {
+              appliedStartup.current = true;
+              adoptSlips([]);
+              publishNotice(startup.notice);
             }
-            publishNotice(startup.notice);
+            setSync("local");
+            return;
           }
-          setSync("saved");
-          return;
+          if (startup.merged) {
+            if (!appliedStartup.current) {
+              appliedStartup.current = true;
+              if (startup.slips) adoptSlips(startup.slips);
+              publishNotice(startup.notice);
+            }
+            markSaved();
+            return;
+          }
+          const plan = planInitialMerge({
+            configured: true,
+            suspended: false,
+            hasUser: session.current() !== null,
+            alreadyMerged: startup.merged,
+          });
+          if (plan === "skip") return;
+          const merged = await session.merge("local-wins", slipsRef.current);
+          if (cancel || haltedRef.current || generation !== syncGeneration.current || !merged) return;
+          adoptSlips(merged.slips);
+          if (merged.dropped.length > 0) {
+            publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
+          }
+          markSaved();
+        } catch (error: unknown) {
+          // A rejected read-merge must not replace the phone wall, and the retry
+          // below has to merge again. A blind upload would drop other devices.
+          // Delete and sign-out must not schedule that retry.
+          if (!cancel && !haltedRef.current && generation === syncGeneration.current) {
+            noteFailure(error);
+            scheduleRetry();
+          }
         }
-        const plan = planInitialMerge({
-          configured: true,
-          suspended: false,
-          hasUser: session.current() !== null,
-          alreadyMerged: startup.merged,
-        });
-        if (plan === "skip") return;
-        const merged = await session.merge("local-wins", slipsRef.current);
-        if (cancel || !merged) return;
-        if (!sameSlipContent(merged.slips, slipsRef.current)) onSlipsRef.current(merged.slips);
-        if (merged.dropped.length > 0) {
-          publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
-        }
-        setSync("saved");
-      })
-      .catch(() => {
-        if (!cancel) setSync("error");
       });
     return () => {
       cancel = true;
     };
-  }, [config, ready, suspended]);
+  }, [config, ready, suspended, markSaved, noteFailure, publishNotice, scheduleRetry]);
 
   useEffect(() => {
-    if (!config || !ready || revision <= 0) return;
-    const identity = createIdentityRef.current;
+    if (!config || !ready || (revision <= 0 && retryTick <= 0)) return;
+    if (haltedRef.current) return;
+    const generation = syncGeneration.current;
     pushChain.current = pushChain.current
       .catch(() => undefined)
       .then(async () => {
-        const session = await load(config);
-        sessionRef.current = session;
-        const creating = session.isCreatingUser();
-        const plan = planWallWrite({
-          configured: true,
-          suspended: suspendedRef.current,
-          hasUser: session.current() !== null || creating,
-          createIdentity: identity || creating,
-          revision,
-        });
-        if (plan === "skip" || plan === "local-only") return;
-        await session.push(() => slipsHolder.current, plan === "create-and-push" || identity);
-        setSync("saved");
-      })
-      .catch(() => {
-        setSync("error");
-        publishNotice("Saved on this phone. It will sync when you’re back online.");
+        if (haltedRef.current || generation !== syncGeneration.current) return;
+        try {
+          const session = await load(config);
+          if (haltedRef.current || generation !== syncGeneration.current) return;
+          sessionRef.current = session;
+          const creating = session.isCreatingUser();
+          const identity = mayCreateIdentity(createIdentityRef.current, allowCreateRef.current);
+          const plan = planWallWrite({
+            configured: true,
+            suspended: suspendedRef.current,
+            hasUser: session.current() !== null || (creating && identity),
+            createIdentity: identity,
+            revision: revision > 0 ? revision : 1,
+            halted: haltedRef.current,
+          });
+          if (plan === "skip" || plan === "local-only") return;
+          const merged = await session.push(() => slipsHolder.current, plan === "create-and-push");
+          if (haltedRef.current || generation !== syncGeneration.current) return;
+          if (merged) {
+            adoptSlips(merged.slips);
+            if (merged.dropped.length > 0) {
+              publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
+            }
+          }
+          markSaved();
+        } catch (error: unknown) {
+          if (haltedRef.current || generation !== syncGeneration.current) return;
+          noteFailure(error);
+          scheduleRetry();
+        }
       });
-  }, [config, ready, revision]);
+  }, [config, ready, revision, retryTick, markSaved, noteFailure, publishNotice, scheduleRetry]);
+
+  useEffect(() => {
+    if (!config) return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || retryAttempt.current === 0) return;
+      clearRetry();
+      setRetryTick((value) => value + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [config, clearRetry]);
+
+  useEffect(() => () => clearRetry(), [clearRetry]);
 
   async function linkGoogle() {
     if (!config) return;
@@ -171,7 +317,11 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     if (!config) return;
     setBusy(true);
     try {
+      stopSync("sign-out");
+      await pushChain.current.catch(() => undefined);
+      await pushChain.current.catch(() => undefined);
       const session = sessionRef.current ?? (await load(config));
+      session.abandonWrites("sign-out");
       await session.signOut();
       setSync("local");
     } finally {
@@ -183,11 +333,16 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     if (!config) return;
     setBusy(true);
     try {
+      stopSync("delete");
+      await pushChain.current.catch(() => undefined);
+      await pushChain.current.catch(() => undefined);
       const session = sessionRef.current ?? (await load(config));
+      session.abandonWrites("delete");
       const result = await session.deleteAccount();
       if (result === "deleted") {
         onSlipsRef.current([]);
         setSync("local");
+        setSyncDetail(null);
         publishNotice("Deleted the saved wall and the Firebase account.");
       }
     } finally {
@@ -202,6 +357,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
       uid: null,
       busy: false,
       sync: "off",
+      syncDetail: null,
       notice: null,
       linkGoogle: async () => {},
       signOut: async () => {},
@@ -216,6 +372,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     uid: user?.uid ?? null,
     busy,
     sync,
+    syncDetail,
     notice,
     linkGoogle,
     signOut,

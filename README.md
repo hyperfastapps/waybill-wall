@@ -2,7 +2,7 @@
 
 Pin a tracking number, guess the shipper, and share the slip. The app does not sign into a carrier.
 
-Carriers: USPS, UPS, FedEx, DHL, HDX, OnTrac.
+Carriers: USPS, UPS, FedEx, DHL, HDX, OnTrac, Amazon.
 
 Without Firebase configured, the wall stays in this browser (`localStorage`) and in the share link (`#w=`). It keeps the numbers, shipper, and captions you type.
 
@@ -12,14 +12,14 @@ With the Firebase env vars below, pinning also creates an anonymous Firebase use
 
 Set these `VITE_` variables for the client. If any of them is missing, the app stays local-only: no auth UI, no Firebase calls.
 
-| Variable                            | Required     | Production value                                      |
-| ----------------------------------- | ------------ | ----------------------------------------------------- |
-| `VITE_FIREBASE_API_KEY`             | for Firebase | Already set on Vercel. Leave it.                      |
-| `VITE_FIREBASE_AUTH_DOMAIN`         | for Firebase | **Change to** `waybill-wall.vercel.app`               |
-| `VITE_FIREBASE_PROJECT_ID`          | for Firebase | `waybill-wall`                                        |
+| Variable                            | Required     | Production value                                               |
+| ----------------------------------- | ------------ | -------------------------------------------------------------- |
+| `VITE_FIREBASE_API_KEY`             | for Firebase | Already set on Vercel. Leave it.                               |
+| `VITE_FIREBASE_AUTH_DOMAIN`         | for Firebase | **Change to** `waybill-wall.vercel.app`                        |
+| `VITE_FIREBASE_PROJECT_ID`          | for Firebase | `waybill-wall`                                                 |
 | `VITE_FIREBASE_STORAGE_BUCKET`      | for Firebase | `waybill-wall.firebasestorage.app` (wall does not use Storage) |
-| `VITE_FIREBASE_MESSAGING_SENDER_ID` | for Firebase | `475380620738`                                        |
-| `VITE_FIREBASE_APP_ID`              | for Firebase | `1:475380620738:web:e080a1baef35c700e18a5b`           |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | for Firebase | `475380620738`                                                 |
+| `VITE_FIREBASE_APP_ID`              | for Firebase | `1:475380620738:web:e080a1baef35c700e18a5b`                    |
 
 Copy [`.env.example`](.env.example) to `.env.local` for local work. Vite inlines `VITE_*` at build time, so change them in the Vercel project and redeploy.
 
@@ -32,11 +32,17 @@ Local emulators only (do not set these on Vercel):
 
 ### What is stored
 
-`walls/{uid}` is readable and writable only by that Firebase user (`request.auth.uid`). Each document is `{ slips, updatedAt }`. A slip is `id`, `number` (8–40 letters or digits), `nickname` (≤ 40), `caption` (≤ 140), and `carrier` (`usps`, `ups`, `fedex`, `dhl`, `hdx`, `ontrac`). At most 12 slips. The rules check the owner, the 12-slip cap, those lengths, and the carrier id. Tracking-number characters are checked in the app: a second pattern on every slip exceeds Firestore’s 1000-expression limit.
+`walls/{uid}` is readable and writable only by that Firebase user (`request.auth.uid`). Each document is `{ slips, updatedAt }`. A slip is `id`, `number` (8–40 letters or digits), `nickname` (≤ 40), `caption` (≤ 140), and `carrier` (`usps`, `ups`, `fedex`, `dhl`, `hdx`, `ontrac`, `amazon`). At most 12 slips. The rules check the owner, the 12-slip cap, those lengths, and the carrier id. Tracking-number characters are checked in the app: a second pattern on every slip exceeds Firestore’s 1000-expression limit.
 
-Pinning is instant and writes `localStorage` first. Firestore updates in the background, including when the browser is offline (the Firestore SDK queues the write). An existing local wall is uploaded on the first sync, which happens on the first pin or when you choose “Save my wall to Google”.
+Pinning is instant and writes `localStorage` first. Firestore updates in the background. If that write cannot reach the server, the phone keeps its slips and retries. Every save reads the current cloud wall and merges before writing, including the first sync after the app opens and every retry. An existing local wall is merged on the first pin or when you choose “Save my wall to Google”.
 
-Google sign-in uses a redirect, not a popup, so it can finish in Android Chrome and in the installed PWA. The app serves Firebase’s `/__/auth/*` and `/__/firebase/*` handler from its own domain (a reverse proxy to `https://waybill-wall.firebaseapp.com`). That only works when `VITE_FIREBASE_AUTH_DOMAIN` is the site itself, `waybill-wall.vercel.app`.
+Amazon slips use carrier `amazon`. Publish `firestore.rules` before or with the app that writes that value. If the app is live first, Firestore rejects the whole wall document (the previous saved wall stays on the server). The phone keeps every slip, including the new Amazon one, and shows that cloud sync will retry. The retry reads the cloud wall again and merges, so a slip another device added in that window stays. A slip removed on this phone is not put back. The merged wall still caps at 12. A rejected sync does not clear the wall or replace it with the older server copy.
+
+Google sign-in uses a redirect, not a popup, so it can finish in Android Chrome and in the installed PWA. The app serves Firebase’s `/__/auth/*` handler from its own domain (a reverse proxy to `https://waybill-wall.firebaseapp.com`). That only works when `VITE_FIREBASE_AUTH_DOMAIN` is the site itself, `waybill-wall.vercel.app`.
+
+`/__/firebase/init.json` is not proxied. Firebase Hosting is not enabled, so that URL on `waybill-wall.firebaseapp.com` is a 404 “Site Not Found” page, and the auth handler requests it while starting Google sign-in. The app serves the same JSON from the `VITE_FIREBASE_*` values. Other `/__/firebase/*` paths are left unanswered instead of being forwarded to that Hosting 404.
+
+Auth state is stored in IndexedDB (`indexedDBLocalPersistence`), and in localStorage only when IndexedDB is unavailable. A user already signed in under the older localStorage persistence is copied into IndexedDB on the next load and then removed from localStorage. Clearing site data for localStorage alone does not sign them out.
 
 The value currently set on Vercel is `waybill-wall.firebaseapp.com`. Change it to `waybill-wall.vercel.app` for Production, Preview, and Development, then redeploy. Leaving `waybill-wall.firebaseapp.com` sends the Google redirect to Firebase’s domain, which Android Chrome and an installed PWA treat as third-party storage and often drop.
 
