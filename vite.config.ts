@@ -9,9 +9,9 @@ import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
 // @ts-expect-error JS plugin alongside the TS vite config
 import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import {
+  firebaseEnvFromProcess,
   isFirebaseAuthPath,
-  proxyFirebaseHostingRequest,
-  readFirebaseProjectId,
+  respondToFirebaseReservedPath,
 } from "./src/lib/firebase-auth-proxy.ts";
 
 /**
@@ -54,13 +54,6 @@ function firebaseAuthProxyPlugin(): Plugin {
             next();
             return;
           }
-          const projectId = readFirebaseProjectId();
-          if (!projectId) {
-            res.statusCode = 404;
-            res.setHeader("content-type", "text/plain; charset=utf-8");
-            res.end("Firebase is not configured.");
-            return;
-          }
           const host = String(req.headers.host ?? "localhost:8080");
           const proto = String(
             req.headers["x-forwarded-proto"] ??
@@ -80,7 +73,7 @@ function firebaseAuthProxyPlugin(): Plugin {
             headers,
             body,
           });
-          const response = await proxyFirebaseHostingRequest(request, projectId);
+          const response = await respondToFirebaseReservedPath(request, firebaseEnvFromProcess());
           await writeNodeResponse(res, response);
         } catch (error) {
           console.error("[waybill] Firebase auth proxy failed:", error);

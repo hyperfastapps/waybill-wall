@@ -1,8 +1,8 @@
 import type { H3Event } from "h3";
 import {
+  firebaseEnvFromProcess,
   isFirebaseAuthPath,
-  proxyFirebaseHostingRequest,
-  readFirebaseProjectId,
+  respondToFirebaseReservedPath,
 } from "../../src/lib/firebase-auth-proxy";
 
 /**
@@ -14,13 +14,6 @@ export default async function firebaseAuthProxy(
   next: () => Promise<unknown>,
 ): Promise<unknown> {
   if (!isFirebaseAuthPath(event.url.pathname)) return next();
-  const projectId = readFirebaseProjectId();
-  if (!projectId) {
-    return new Response("Firebase is not configured.", {
-      status: 404,
-      headers: { "content-type": "text/plain; charset=utf-8" },
-    });
-  }
   const method = event.req.method.toUpperCase();
   const request = new Request(event.url, {
     method,
@@ -29,5 +22,5 @@ export default async function firebaseAuthProxy(
     // Node's fetch requires duplex when a stream body is forwarded.
     duplex: "half",
   } as RequestInit);
-  return proxyFirebaseHostingRequest(request, projectId);
+  return respondToFirebaseReservedPath(request, firebaseEnvFromProcess());
 }

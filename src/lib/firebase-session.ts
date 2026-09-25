@@ -1,15 +1,14 @@
-import { FirebaseError, getApp, getApps, initializeApp } from "firebase/app";
+import { FirebaseError, getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
 import {
   GoogleAuthProvider,
-  browserLocalPersistence,
   connectAuthEmulator,
   deleteUser,
   getAuth,
   getRedirectResult,
+  initializeAuth,
   linkWithRedirect,
   onAuthStateChanged,
   reauthenticateWithRedirect,
-  setPersistence,
   signInAnonymously,
   signInWithCredential,
   signInWithRedirect,
@@ -31,10 +30,24 @@ import {
   setDoc,
   type Firestore,
 } from "firebase/firestore";
+import { wallAuthInitOptions } from "@/lib/firebase-auth-persistence";
 import { isCarrierId, isTrackingNumber } from "@/lib/carriers";
 import { parseEmulatorHost, type FirebaseClientConfig } from "@/lib/firebase-config";
 import { mergeSlips, sameSlipContent, type MergeResult } from "@/lib/wall-merge";
 import { normalizeNumber, type Slip } from "@/lib/wall-codec";
+
+export function openWallAuth(app: FirebaseApp): Auth {
+  try {
+    return initializeAuth(app, wallAuthInitOptions());
+  } catch (error) {
+    const code =
+      typeof error === "object" && error && "code" in error
+        ? String((error as { code: unknown }).code)
+        : "";
+    if (code === "auth/already-initialized") return getAuth(app);
+    throw error;
+  }
+}
 
 const PENDING_SYNC = "waybill-pending-sync";
 const PENDING_DELETE = "waybill-pending-delete";
@@ -96,7 +109,7 @@ export function loadFirebaseSession(
  */
 async function createSession(config: FirebaseClientConfig): Promise<FirebaseSession> {
   const app = getApps().length > 0 ? getApp() : initializeApp(config.web);
-  const auth = getAuth(app);
+  const auth = openWallAuth(app);
   const authHost = parseEmulatorHost(config.authEmulatorHost);
   if (authHost) {
     try {
@@ -116,7 +129,6 @@ async function createSession(config: FirebaseClientConfig): Promise<FirebaseSess
       /* already connected */
     }
   }
-  await setPersistence(auth, browserLocalPersistence);
   const startup = await settleRedirect(auth, db);
   return bindSession(auth, db, startup);
 }

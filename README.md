@@ -38,7 +38,11 @@ Pinning is instant and writes `localStorage` first. Firestore updates in the bac
 
 Amazon slips use carrier `amazon`. Publish `firestore.rules` before or with the app that writes that value. If the app is live first, Firestore rejects the whole wall document (the previous saved wall stays on the server). The phone keeps every slip, including the new Amazon one, shows that cloud sync will retry, and uploads the same wall once the rules allow `amazon`. A rejected sync does not clear the wall or replace it with the older server copy.
 
-Google sign-in uses a redirect, not a popup, so it can finish in Android Chrome and in the installed PWA. The app serves Firebase’s `/__/auth/*` and `/__/firebase/*` handler from its own domain (a reverse proxy to `https://waybill-wall.firebaseapp.com`). That only works when `VITE_FIREBASE_AUTH_DOMAIN` is the site itself, `waybill-wall.vercel.app`.
+Google sign-in uses a redirect, not a popup, so it can finish in Android Chrome and in the installed PWA. The app serves Firebase’s `/__/auth/*` handler from its own domain (a reverse proxy to `https://waybill-wall.firebaseapp.com`). That only works when `VITE_FIREBASE_AUTH_DOMAIN` is the site itself, `waybill-wall.vercel.app`.
+
+`/__/firebase/init.json` is not proxied. Firebase Hosting is not enabled, so that URL on `waybill-wall.firebaseapp.com` is a 404 “Site Not Found” page, and the auth handler requests it while starting Google sign-in. The app serves the same JSON from the `VITE_FIREBASE_*` values. Other `/__/firebase/*` paths are left unanswered instead of being forwarded to that Hosting 404.
+
+Auth state is stored in IndexedDB (`indexedDBLocalPersistence`), and in localStorage only when IndexedDB is unavailable. A user already signed in under the older localStorage persistence is copied into IndexedDB on the next load and then removed from localStorage. Clearing site data for localStorage alone does not sign them out.
 
 The value currently set on Vercel is `waybill-wall.firebaseapp.com`. Change it to `waybill-wall.vercel.app` for Production, Preview, and Development, then redeploy. Leaving `waybill-wall.firebaseapp.com` sends the Google redirect to Firebase’s domain, which Android Chrome and an installed PWA treat as third-party storage and often drop.
 
