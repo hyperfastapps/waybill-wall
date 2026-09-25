@@ -4,7 +4,15 @@ import { ExternalLink, Link2, Loader2, ShieldCheck, Trash2 } from "lucide-react"
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { toast } from "sonner";
 import { lookupShipment, type PublicTrack } from "@/lib/fedex-track";
-import { CARRIERS, carrierById, guessCarrier, isCarrierId, isTrackingNumber, trackUrl, type CarrierId } from "@/lib/carriers";
+import {
+  CARRIERS,
+  carrierById,
+  guessCarrier,
+  isCarrierId,
+  isTrackingNumber,
+  trackUrl,
+  type CarrierId,
+} from "@/lib/carriers";
 import {
   WALL_HASH_PREFIX,
   WALL_STORAGE_KEY,
@@ -91,7 +99,11 @@ function Home() {
     }
     const next = slips.length > 0 ? `#${WALL_HASH_PREFIX}${encoded}` : "";
     if (window.location.hash !== next) {
-      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${next}`);
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${window.location.search}${next}`,
+      );
     }
   }, [cards, ready]);
 
@@ -137,7 +149,10 @@ function Home() {
       /^[A-Z]{2}\d{9}[A-Z]{2}$/i.test(cleaned) ||
       /^\d{12}$/.test(cleaned) ||
       /^\d{15}$/.test(cleaned) ||
-      /^\d{20,34}$/.test(cleaned);
+      /^\d{20,34}$/.test(cleaned) ||
+      /^[CD]\d{14}$/i.test(cleaned) ||
+      /^1LS[A-Z0-9]{5,}$/i.test(cleaned) ||
+      /^BN[A-Z0-9]{6,}$/i.test(cleaned);
     if (pasted || jumped || finished) guessNow(next);
   }
 
@@ -221,14 +236,6 @@ function Home() {
           Copy link
         </button>
       </header>
-
-      <a
-        href="/waybill-to-the-wall-reel.mp4"
-        download="waybill-to-the-wall-reel.mp4"
-        className="mb-3 flex h-11 items-center justify-center rounded-xl border border-line bg-card text-sm font-semibold text-ink"
-      >
-        Save the reel
-      </a>
 
       <form
         onSubmit={(event) => event.preventDefault()}
@@ -347,13 +354,17 @@ function Home() {
           <div className="rounded-card border border-dashed border-line bg-card px-5 py-10 text-center">
             <p className="font-display text-2xl">Nothing pinned yet.</p>
             <p className="mx-auto mt-2 max-w-sm text-sm text-muted">
-              Add a number you are willing to show. The share link carries those slips and nothing else.
+              Add a number you are willing to show. The share link carries those slips and nothing
+              else.
             </p>
           </div>
         ) : (
           <ul className="grid gap-4 sm:grid-cols-2">
             {cards.map((card) => (
-              <li key={card.id} className="rise overflow-hidden rounded-card border border-line bg-card">
+              <li
+                key={card.id}
+                className="rise overflow-hidden rounded-card border border-line bg-card"
+              >
                 <div className="flex">
                   <div className="w-1.5 shrink-0 bg-stamp" aria-hidden="true" />
                   <div className="min-w-0 flex-1 p-4">
@@ -408,13 +419,16 @@ function Home() {
 
       <div className="mt-8 grid gap-3">
         {shared ? (
-          <p className="text-sm text-muted">Opened from a shared link. Editing it updates this browser’s copy.</p>
+          <p className="text-sm text-muted">
+            Opened from a shared link. Editing it updates this browser’s copy.
+          </p>
         ) : null}
         <p className="flex gap-3 rounded-card border border-line bg-card px-4 py-3 text-sm text-ink">
           <ShieldCheck className="mt-0.5 size-4 shrink-0 text-stamp" aria-hidden="true" />
           <span>
-            This does not log into a carrier as you. Account pages, signatures, and delivery addresses
-            stay on their site. The wall only keeps the numbers, shipper, and captions you type.
+            This does not log into a carrier as you. Account pages, signatures, and delivery
+            addresses stay on their site. The wall only keeps the numbers, shipper, and captions you
+            type.
           </span>
         </p>
       </div>
@@ -456,9 +470,7 @@ function TrackBody({ track }: { track: PublicTrack }) {
           {track.events.map((event, index) => (
             <li key={`${event.when}-${index}`} className="text-sm">
               <p>{event.what}</p>
-              <p className="text-muted">
-                {[event.where, event.when].filter(Boolean).join(" · ")}
-              </p>
+              <p className="text-muted">{[event.where, event.when].filter(Boolean).join(" · ")}</p>
             </li>
           ))}
         </ol>

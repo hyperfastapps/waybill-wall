@@ -1,4 +1,4 @@
-export const CARRIER_IDS = ["usps", "ups", "fedex", "dhl", "hdx"] as const;
+export const CARRIER_IDS = ["usps", "ups", "fedex", "dhl", "hdx", "ontrac"] as const;
 
 export type CarrierId = (typeof CARRIER_IDS)[number];
 
@@ -19,6 +19,7 @@ export const CARRIERS: Carrier[] = [
   { id: "fedex", name: "FedEx", perDay: "9.9M/day" },
   { id: "dhl", name: "DHL", perDay: "" },
   { id: "hdx", name: "HDX", perDay: "" },
+  { id: "ontrac", name: "OnTrac", perDay: "" },
 ];
 
 export function isCarrierId(value: string): value is CarrierId {
@@ -42,7 +43,10 @@ export function trackUrl(id: CarrierId, number: string): string {
     case "dhl":
       return `https://www.dhl.com/us-en/home/tracking.html?tracking-id=${encoded}`;
     case "hdx":
-      return "https://www.hdxcn.com/";
+      // EmmisTrack on the carrier site. GET with cno opens that waybill, not the homepage.
+      return `http://www.hdxcn.com/cgi-bin/GInfo.dll?EmmisTrack&w=qdhuandao&cno=${encoded}`;
+    case "ontrac":
+      return `https://www.ontrac.com/tracking/?number=${encoded}`;
   }
 }
 
@@ -82,6 +86,16 @@ export function guessCarrier(raw: string): CarrierId {
   if (/^[A-Z]{2}\d{9}DE$/.test(number)) add("dhl", 70);
 
   if (/^HDX[A-Z0-9]+/.test(number)) add("hdx", 96);
+
+  // Classic OnTrac is C or D plus 14 digits. LaserShip prefixes still track on
+  // OnTrac (1LS, LS, BN). LX stays with DHL — that prefix is already theirs.
+  if (/^[CD]\d{14}$/.test(number)) add("ontrac", 100);
+  if (/^1LS[A-Z0-9]{5,}$/.test(number)) add("ontrac", 97);
+  if (/^BN[A-Z0-9]{6,}$/.test(number)) add("ontrac", 93);
+  if (/^LS[A-Z0-9]{6,}$/.test(number)) add("ontrac", 90);
+  // Newer numeric barcodes are 20 digits and zero-padded (at least four leading zeros).
+  // FedEx door tags of the same length do not lead with zeros, so they keep their score.
+  if (/^0{4}\d{16}$/.test(number)) add("ontrac", 92);
 
   let best: CarrierId = "usps";
   let bestScore = 0;
