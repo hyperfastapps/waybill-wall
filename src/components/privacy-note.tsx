@@ -67,9 +67,11 @@ export function PrivacyDetails() {
         wall, and opening it does not write your account.
       </p>
       <p>
-        Sign out leaves the slips on this phone and stops syncing. The next pin starts a new
-        anonymous saved wall. “Delete my data” deletes the Firestore wall and the Firebase user, and
-        clears the slips on this phone.
+        Signing out of an anonymous ID leaves that wall in Firestore with no way to sign back in.
+        Save it to Google first if you still need it. Signing out of a linked Google account leaves
+        the slips on this phone and stops syncing; that wall stays on the Google account. The next
+        pin starts a new anonymous saved wall. “Delete my data” deletes the Firestore wall and the
+        Firebase user, and clears the slips on this phone.
       </p>
       <p>
         The app still does not sign into USPS, UPS, FedEx, DHL, HDX, OnTrac, or Amazon. Opening a
