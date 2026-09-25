@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FirebaseClientConfig } from "@/lib/firebase-config";
 import {
   classifySyncFailure,
@@ -64,44 +64,47 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   const retryAttempt = useRef(0);
   const failureNoted = useRef(false);
 
-  function clearRetry() {
+  const publishNotice = useCallback((text: string | null) => {
+    if (!text) return;
+    noticeId.current += 1;
+    setNotice({ id: noticeId.current, text });
+  }, []);
+
+  const clearRetry = useCallback(() => {
     if (retryTimer.current != null) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
     }
-  }
+  }, []);
 
-  function noteFailure(error: unknown) {
-    const text = syncFailureNotice(classifySyncFailure(error));
-    setSync("error");
-    setSyncDetail(text);
-    if (failureNoted.current) return;
-    failureNoted.current = true;
-    publishNotice(text);
-  }
+  const noteFailure = useCallback(
+    (error: unknown) => {
+      const text = syncFailureNotice(classifySyncFailure(error));
+      setSync("error");
+      setSyncDetail(text);
+      if (failureNoted.current) return;
+      failureNoted.current = true;
+      publishNotice(text);
+    },
+    [publishNotice],
+  );
 
-  function markSaved() {
+  const markSaved = useCallback(() => {
     retryAttempt.current = 0;
     failureNoted.current = false;
     clearRetry();
     setSync("saved");
     setSyncDetail(null);
-  }
+  }, [clearRetry]);
 
-  function scheduleRetry() {
+  const scheduleRetry = useCallback(() => {
     clearRetry();
     retryAttempt.current += 1;
     retryTimer.current = setTimeout(() => {
       retryTimer.current = null;
       setRetryTick((value) => value + 1);
     }, syncRetryDelayMs(retryAttempt.current));
-  }
-
-  function publishNotice(text: string | null) {
-    if (!text) return;
-    noticeId.current += 1;
-    setNotice({ id: noticeId.current, text });
-  }
+  }, [clearRetry]);
 
   useEffect(() => {
     if (!config) return;
@@ -177,7 +180,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     return () => {
       cancel = true;
     };
-  }, [config, ready, suspended]);
+  }, [config, ready, suspended, markSaved, noteFailure, publishNotice, scheduleRetry]);
 
   useEffect(() => {
     if (!config || !ready || (revision <= 0 && retryTick <= 0)) return;
@@ -203,7 +206,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
         noteFailure(error);
         scheduleRetry();
       });
-  }, [config, ready, revision, retryTick]);
+  }, [config, ready, revision, retryTick, markSaved, noteFailure, scheduleRetry]);
 
   useEffect(() => {
     if (!config) return;
@@ -216,9 +219,9 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [config]);
+  }, [config, clearRetry]);
 
-  useEffect(() => () => clearRetry(), []);
+  useEffect(() => () => clearRetry(), [clearRetry]);
 
   async function linkGoogle() {
     if (!config) return;
