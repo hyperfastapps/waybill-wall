@@ -43,6 +43,13 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   slipsHolder.current = slips;
   const slipsRef = useRef(slips);
   slipsRef.current = slips;
+
+  function adoptSlips(next: Slip[]) {
+    if (sameSlipContent(next, slipsHolder.current)) return;
+    slipsHolder.current = next;
+    slipsRef.current = next;
+    onSlipsRef.current(next);
+  }
   const onSlipsRef = useRef(onSlips);
   onSlipsRef.current = onSlips;
   const suspendedRef = useRef(suspended);
@@ -130,51 +137,54 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   useEffect(() => {
     if (!config || !ready || suspended) return;
     let cancel = false;
-    void load(config)
-      .then(async (session) => {
+    pushChain.current = pushChain.current
+      .catch(() => undefined)
+      .then(async () => {
         if (cancel || suspendedRef.current) return;
-        sessionRef.current = session;
-        const startup = session.startup;
-        if (startup.deleted) {
-          if (!appliedStartup.current) {
-            appliedStartup.current = true;
-            onSlipsRef.current([]);
-            publishNotice(startup.notice);
-          }
-          setSync("local");
-          return;
-        }
-        if (startup.merged) {
-          if (!appliedStartup.current) {
-            appliedStartup.current = true;
-            if (startup.slips && !sameSlipContent(startup.slips, slipsRef.current)) {
-              onSlipsRef.current(startup.slips);
+        try {
+          const session = await load(config);
+          if (cancel || suspendedRef.current) return;
+          sessionRef.current = session;
+          const startup = session.startup;
+          if (startup.deleted) {
+            if (!appliedStartup.current) {
+              appliedStartup.current = true;
+              adoptSlips([]);
+              publishNotice(startup.notice);
             }
-            publishNotice(startup.notice);
+            setSync("local");
+            return;
+          }
+          if (startup.merged) {
+            if (!appliedStartup.current) {
+              appliedStartup.current = true;
+              if (startup.slips) adoptSlips(startup.slips);
+              publishNotice(startup.notice);
+            }
+            markSaved();
+            return;
+          }
+          const plan = planInitialMerge({
+            configured: true,
+            suspended: false,
+            hasUser: session.current() !== null,
+            alreadyMerged: startup.merged,
+          });
+          if (plan === "skip") return;
+          const merged = await session.merge("local-wins", slipsRef.current);
+          if (cancel || !merged) return;
+          adoptSlips(merged.slips);
+          if (merged.dropped.length > 0) {
+            publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
           }
           markSaved();
-          return;
-        }
-        const plan = planInitialMerge({
-          configured: true,
-          suspended: false,
-          hasUser: session.current() !== null,
-          alreadyMerged: startup.merged,
-        });
-        if (plan === "skip") return;
-        const merged = await session.merge("local-wins", slipsRef.current);
-        if (cancel || !merged) return;
-        if (!sameSlipContent(merged.slips, slipsRef.current)) onSlipsRef.current(merged.slips);
-        if (merged.dropped.length > 0) {
-          publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
-        }
-        markSaved();
-      })
-      .catch((error: unknown) => {
-        // A rejected write must not replace the slips on screen with the older server wall.
-        if (!cancel) {
-          noteFailure(error);
-          scheduleRetry();
+        } catch (error: unknown) {
+          // A rejected read-merge must not replace the phone wall, and the retry
+          // below has to merge again. A blind upload would drop other devices.
+          if (!cancel) {
+            noteFailure(error);
+            scheduleRetry();
+          }
         }
       });
     return () => {
@@ -188,25 +198,35 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     pushChain.current = pushChain.current
       .catch(() => undefined)
       .then(async () => {
-        const session = await load(config);
-        sessionRef.current = session;
-        const creating = session.isCreatingUser();
-        const plan = planWallWrite({
-          configured: true,
-          suspended: suspendedRef.current,
-          hasUser: session.current() !== null || creating,
-          createIdentity: identity || creating,
-          revision: revision > 0 ? revision : 1,
-        });
-        if (plan === "skip" || plan === "local-only") return;
-        await session.push(() => slipsHolder.current, plan === "create-and-push" || identity);
-        markSaved();
-      })
-      .catch((error: unknown) => {
-        noteFailure(error);
-        scheduleRetry();
+        try {
+          const session = await load(config);
+          sessionRef.current = session;
+          const creating = session.isCreatingUser();
+          const plan = planWallWrite({
+            configured: true,
+            suspended: suspendedRef.current,
+            hasUser: session.current() !== null || creating,
+            createIdentity: identity || creating,
+            revision: revision > 0 ? revision : 1,
+          });
+          if (plan === "skip" || plan === "local-only") return;
+          const merged = await session.push(
+            () => slipsHolder.current,
+            plan === "create-and-push" || identity,
+          );
+          if (merged) {
+            adoptSlips(merged.slips);
+            if (merged.dropped.length > 0) {
+              publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
+            }
+          }
+          markSaved();
+        } catch (error: unknown) {
+          noteFailure(error);
+          scheduleRetry();
+        }
       });
-  }, [config, ready, revision, retryTick, markSaved, noteFailure, scheduleRetry]);
+  }, [config, ready, revision, retryTick, markSaved, noteFailure, publishNotice, scheduleRetry]);
 
   useEffect(() => {
     if (!config) return;

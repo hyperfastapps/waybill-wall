@@ -8,8 +8,12 @@ export type MergeResult = {
   dropped: Slip[];
 };
 
-function trackingKey(number: string): string {
+export function slipTrackingKey(number: string): string {
   return normalizeNumber(number).toUpperCase();
+}
+
+function trackingKey(number: string): string {
+  return slipTrackingKey(number);
 }
 
 /**
@@ -51,6 +55,53 @@ export function mergeSlips(base: Slip[], incoming: Slip[]): MergeResult {
   }
 
   return { slips, dropped, duplicates };
+}
+
+/**
+ * Build the next cloud wall from this device and the current server document.
+ *
+ * `syncedKeys` is the tracking-number set last written successfully from this
+ * device. A key in that set and missing locally was removed here, so the server
+ * copy is not put back. Keys we have never synced are not deletions: the server
+ * slip is kept. `null` means there is no baseline yet (union, local wins on
+ * duplicates). The result is still capped at 12, and local slips stay ahead of
+ * server-only ones.
+ */
+export function reconcileWall(
+  local: Slip[],
+  remote: Slip[],
+  syncedKeys: readonly string[] | null,
+): MergeResult {
+  if (!syncedKeys) return mergeSlips(local, remote);
+  const localKeys = new Set<string>();
+  for (const slip of local) {
+    const key = trackingKey(slip.number);
+    if (key) localKeys.add(key);
+  }
+  const removed = new Set<string>();
+  for (const key of syncedKeys) {
+    const normalized = trackingKey(key);
+    if (normalized && !localKeys.has(normalized)) removed.add(normalized);
+  }
+  const incoming = remote.filter((slip) => {
+    const key = trackingKey(slip.number);
+    return Boolean(key) && !removed.has(key);
+  });
+  return mergeSlips(local, incoming);
+}
+
+/** Tracking numbers in the wall we just saved. This is the next deletion baseline. */
+export function syncedTrackingKeys(slips: Slip[]): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  for (const slip of slips) {
+    const key = trackingKey(slip.number);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+    if (keys.length === MAX_SLIPS) break;
+  }
+  return keys;
 }
 
 /** Compare the fields that round-trip through the share hash, ignoring ids. */
