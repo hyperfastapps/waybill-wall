@@ -4,6 +4,8 @@
  *   npx firebase-tools emulators:exec --only auth,firestore --project demo-waybill -- \
  *     node scripts/firebase-emulator-check.mjs
  *
+ * Always pass --project demo-waybill. .firebaserc defaults to the real
+ * project waybill-wall; this script must stay on the emulator demo project.
  * Expects the ports in firebase.json (auth 9099, firestore 8088).
  */
 import assert from "node:assert/strict";
