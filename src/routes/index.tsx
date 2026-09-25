@@ -1,9 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { ExternalLink, Link2, Loader2, ShieldCheck, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { ExternalLink, Link2, Loader2, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { toast } from "sonner";
+import { AccountBar } from "@/components/account-bar";
+import { PrivacyNote } from "@/components/privacy-note";
 import { lookupShipment, type PublicTrack } from "@/lib/fedex-track";
+import { readFirebaseConfig } from "@/lib/firebase-config";
+import { useFirebaseWall } from "@/lib/use-firebase-wall";
 import {
   CARRIERS,
   carrierById,
@@ -13,6 +17,7 @@ import {
   trackUrl,
   type CarrierId,
 } from "@/lib/carriers";
+import { mergeSlips, sameSlipContent } from "@/lib/wall-merge";
 import {
   WALL_HASH_PREFIX,
   WALL_STORAGE_KEY,
@@ -21,6 +26,17 @@ import {
   normalizeNumber,
   type Slip,
 } from "@/lib/wall-codec";
+
+const firebaseConfig = readFirebaseConfig({
+  VITE_FIREBASE_API_KEY: import.meta.env.VITE_FIREBASE_API_KEY,
+  VITE_FIREBASE_AUTH_DOMAIN: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  VITE_FIREBASE_PROJECT_ID: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  VITE_FIREBASE_STORAGE_BUCKET: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  VITE_FIREBASE_MESSAGING_SENDER_ID: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  VITE_FIREBASE_APP_ID: import.meta.env.VITE_FIREBASE_APP_ID,
+  VITE_FIREBASE_AUTH_EMULATOR_HOST: import.meta.env.VITE_FIREBASE_AUTH_EMULATOR_HOST,
+  VITE_FIREBASE_FIRESTORE_EMULATOR_HOST: import.meta.env.VITE_FIREBASE_FIRESTORE_EMULATOR_HOST,
+});
 
 export const Route = createFileRoute("/")({ component: Home });
 
@@ -31,6 +47,52 @@ type Card = Slip & {
 
 const fieldClass =
   "h-11 w-full rounded-xl border border-line bg-paper px-3 text-base text-ink outline-none placeholder:text-muted focus:border-ink";
+
+function readStoredSlips(): Slip[] {
+  try {
+    const stored = window.localStorage.getItem(WALL_STORAGE_KEY);
+    if (!stored) return [];
+    return decodeWall(stored) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function readHashSlips(): Slip[] | null {
+  const hash = window.location.hash.replace(/^#/, "");
+  if (!hash.startsWith(WALL_HASH_PREFIX)) return null;
+  const decoded = decodeWall(hash.slice(WALL_HASH_PREFIX.length));
+  if (!decoded || decoded.length === 0) return null;
+  return decoded;
+}
+
+function toSlip(card: Card): Slip {
+  return {
+    id: card.id,
+    number: card.number,
+    nickname: card.nickname,
+    caption: card.caption,
+    carrier: card.carrier,
+  };
+}
+
+function toCard(slip: Slip): Card {
+  return { ...slip, pending: true, track: null };
+}
+
+function authErrorText(error: unknown): string {
+  const code =
+    typeof error === "object" && error && "code" in error
+      ? String((error as { code: unknown }).code)
+      : "";
+  if (code === "auth/unauthorized-domain") {
+    return "This site isn’t an authorized domain in Firebase yet.";
+  }
+  if (code === "auth/operation-not-supported-in-this-environment") {
+    return "Google sign-in isn’t available in this browser.";
+  }
+  return "Couldn’t reach Google sign-in. The slips stay on this phone.";
+}
 
 function nicknameFor(number: string, nickname: string): string {
   const trimmed = nickname.trim();
@@ -49,54 +111,52 @@ function Home() {
   const manualRef = useRef(false);
   const [cards, setCards] = useState<Card[]>([]);
   const [ready, setReady] = useState(false);
-  const [shared, setShared] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [pinning, setPinning] = useState(false);
+  const [foreignShare, setForeignShare] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [createIdentity, setCreateIdentity] = useState(false);
+  const hydrateRef = useRef<(targets: Card[]) => Promise<void>>(async () => {});
+
+  const onSlips = useCallback((next: Slip[]) => {
+    const cardsNext = next.map(toCard);
+    setCards(cardsNext);
+    void hydrateRef.current(cardsNext);
+  }, []);
+
+  const account = useFirebaseWall({
+    config: firebaseConfig,
+    ready,
+    suspended: foreignShare,
+    revision,
+    createIdentity,
+    slips: cards.map(toSlip),
+    onSlips,
+  });
 
   useEffect(() => {
-    let initial: Slip[] = [];
-    let fromShare = false;
-    const hash = window.location.hash.replace(/^#/, "");
-    if (hash.startsWith(WALL_HASH_PREFIX)) {
-      const decoded = decodeWall(hash.slice(WALL_HASH_PREFIX.length));
-      if (decoded && decoded.length > 0) {
-        initial = decoded;
-        fromShare = true;
-      }
-    }
-    if (!fromShare) {
-      try {
-        const stored = window.localStorage.getItem(WALL_STORAGE_KEY);
-        if (stored) {
-          const decoded = decodeWall(stored);
-          if (decoded) initial = decoded;
-        }
-      } catch {
-        /* private mode */
-      }
-    }
-    const next = initial.map((slip) => ({ ...slip, pending: true, track: null }));
+    if (!account.notice) return;
+    toast(account.notice.text);
+  }, [account.notice]);
+
+  useEffect(() => {
+    const local = readStoredSlips();
+    const hashed = readHashSlips();
+    const foreign = hashed !== null && !sameSlipContent(hashed, local);
+    const initial = foreign && hashed ? hashed : local;
+    const next = initial.map(toCard);
     setCards(next);
-    setShared(fromShare);
+    setForeignShare(foreign);
     setReady(true);
     void hydrate(next);
+    // Mount-only: hydrate is the tracker lookup from this first render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!ready) return;
-    const slips: Slip[] = cards.map(({ id, number: n, nickname: k, caption: c, carrier: s }) => ({
-      id,
-      number: n,
-      nickname: k,
-      caption: c,
-      carrier: s,
-    }));
+    const slips = cards.map(toSlip);
     const encoded = encodeWall(slips);
-    try {
-      window.localStorage.setItem(WALL_STORAGE_KEY, encoded);
-    } catch {
-      /* ignore quota */
-    }
     const next = slips.length > 0 ? `#${WALL_HASH_PREFIX}${encoded}` : "";
     if (window.location.hash !== next) {
       window.history.replaceState(
@@ -105,7 +165,13 @@ function Home() {
         `${window.location.pathname}${window.location.search}${next}`,
       );
     }
-  }, [cards, ready]);
+    if (foreignShare) return;
+    try {
+      window.localStorage.setItem(WALL_STORAGE_KEY, encoded);
+    } catch {
+      /* ignore quota */
+    }
+  }, [cards, ready, foreignShare]);
 
   async function hydrate(targets: Card[]) {
     await Promise.all(
@@ -122,6 +188,8 @@ function Home() {
       }),
     );
   }
+
+  hydrateRef.current = hydrate;
 
   function guessNow(raw: string) {
     const cleaned = normalizeNumber(raw);
@@ -181,7 +249,13 @@ function Home() {
       pending: true,
       track: null,
     };
-    setCards((current) => [slip, ...current]);
+    if (foreignShare) {
+      setCards((current) => [slip, ...current]);
+    } else {
+      setCreateIdentity(true);
+      setCards((current) => [slip, ...current]);
+      setRevision((value) => value + 1);
+    }
     setNumber("");
     numberRef.current = "";
     setNickname("");
@@ -195,7 +269,32 @@ function Home() {
   }
 
   function removeCard(id: string) {
+    if (!foreignShare) {
+      setCreateIdentity(false);
+      setRevision((value) => value + 1);
+    }
     setCards((current) => current.filter((card) => card.id !== id));
+  }
+
+  function showOwnWall() {
+    const local = readStoredSlips().map(toCard);
+    setForeignShare(false);
+    setConfirmClear(false);
+    setCards(local);
+    void hydrate(local);
+  }
+
+  function adoptShare() {
+    const merged = mergeSlips(readStoredSlips(), cards.map(toSlip));
+    const next = merged.slips.map(toCard);
+    setForeignShare(false);
+    setCreateIdentity(true);
+    setCards(next);
+    setRevision((value) => value + 1);
+    if (merged.dropped.length > 0) {
+      toast("Some slips didn’t fit on the 12-slip wall.");
+    }
+    void hydrate(next);
   }
 
   async function copyLink() {
@@ -213,13 +312,18 @@ function Home() {
   }
 
   function clearWall() {
+    if (foreignShare) {
+      showOwnWall();
+      return;
+    }
     if (!confirmClear) {
       setConfirmClear(true);
       return;
     }
+    setCreateIdentity(false);
     setCards([]);
-    setShared(false);
     setConfirmClear(false);
+    setRevision((value) => value + 1);
     toast("Wall cleared on this browser.");
   }
 
@@ -236,6 +340,56 @@ function Home() {
           Copy link
         </button>
       </header>
+
+      {account.mode !== "off" ? (
+        <AccountBar
+          mode={account.mode}
+          email={account.email}
+          uid={account.uid}
+          busy={account.busy}
+          sync={account.sync}
+          onGoogle={() => {
+            void account.linkGoogle().catch((error: unknown) => {
+              toast.error(authErrorText(error));
+            });
+          }}
+          onSignOut={() => {
+            void account.signOut().catch(() => {
+              toast.error("Couldn’t sign out. The slips stay on this phone.");
+            });
+          }}
+          onDelete={() => {
+            void account.deleteData().catch(() => {
+              toast.error("Couldn’t delete the saved wall. The slips stay on this phone.");
+            });
+          }}
+        />
+      ) : null}
+
+      {foreignShare ? (
+        <div className="mb-3 rounded-card border border-line bg-card px-4 py-3 text-sm text-ink">
+          <p>
+            Opened from a shared link. These slips are only in the URL. Opening this link does not
+            create an account and does not change your saved wall.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={showOwnWall}
+              className="inline-flex h-11 items-center rounded-xl bg-ink px-3 text-sm font-semibold text-card"
+            >
+              Back to my wall
+            </button>
+            <button
+              type="button"
+              onClick={adoptShare}
+              className="inline-flex h-11 items-center rounded-xl px-3 text-sm font-semibold text-stamp"
+            >
+              Add these to my wall
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <form
         onSubmit={(event) => event.preventDefault()}
@@ -418,19 +572,7 @@ function Home() {
       </section>
 
       <div className="mt-8 grid gap-3">
-        {shared ? (
-          <p className="text-sm text-muted">
-            Opened from a shared link. Editing it updates this browser’s copy.
-          </p>
-        ) : null}
-        <p className="flex gap-3 rounded-card border border-line bg-card px-4 py-3 text-sm text-ink">
-          <ShieldCheck className="mt-0.5 size-4 shrink-0 text-stamp" aria-hidden="true" />
-          <span>
-            This does not log into a carrier as you. Account pages, signatures, and delivery
-            addresses stay on their site. The wall only keeps the numbers, shipper, and captions you
-            type.
-          </span>
-        </p>
+        <PrivacyNote firebaseOn={firebaseConfig !== null} />
       </div>
     </main>
   );

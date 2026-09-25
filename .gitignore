@@ -9,3 +9,4 @@ attachments
 *.mp3
 .env
 .env.*
+!.env.example

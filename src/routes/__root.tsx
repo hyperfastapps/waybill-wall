@@ -14,7 +14,7 @@ export const Route = createRootRoute({
       { title: APP_NAME },
       {
         name: "description",
-        content: "Pin a tracking number, guess the shipper, and share the wall. No account login.",
+        content: "Pin a tracking number, guess the shipper, and share the wall.",
       },
       { name: "theme-color", content: "#f4efe6" },
       { name: "apple-mobile-web-app-title", content: APP_NAME },
