@@ -357,11 +357,13 @@ function Home() {
             });
           }}
           onSignOut={() => {
+            setCreateIdentity(false);
             void account.signOut().catch(() => {
               toast.error("Couldn’t sign out. The slips stay on this phone.");
             });
           }}
           onDelete={() => {
+            setCreateIdentity(false);
             void account.deleteData().catch(() => {
               toast.error("Couldn’t delete the saved wall. The slips stay on this phone.");
             });

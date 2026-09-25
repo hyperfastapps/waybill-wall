@@ -8,6 +8,12 @@ export type WallWriteInput = {
   /** True only for a pin, adopting a share, or an explicit Google sign-in. */
   createIdentity: boolean;
   revision: number;
+  /**
+   * Set by delete and sign-out until the next local edit. A pending retry must
+   * not upload or create an account while this is set, even if a user object
+   * is still in memory.
+   */
+  halted?: boolean;
 };
 
 /**
@@ -18,9 +24,79 @@ export type WallWriteInput = {
 export function planWallWrite(input: WallWriteInput): WallWritePlan {
   if (!input.configured) return "local-only";
   if (input.suspended || input.revision <= 0) return "skip";
+  if (input.halted) return "local-only";
   if (input.hasUser) return "push";
   if (input.createIdentity) return "create-and-push";
   return "local-only";
+}
+
+export type AbandonReason = "delete" | "sign-out";
+
+export type SyncHaltState = {
+  generation: number;
+  allowCreate: boolean;
+  retryAttempt: number;
+  halted: boolean;
+};
+
+/**
+ * Delete and sign-out share this. The generation bump makes a save that already
+ * started stale. allowCreate stays false until a later pin (a revision change)
+ * sets it again, so a pending retry cannot call signInAnonymously.
+ */
+export function haltSync(state: SyncHaltState): SyncHaltState {
+  return {
+    generation: state.generation + 1,
+    allowCreate: false,
+    retryAttempt: 0,
+    halted: true,
+  };
+}
+
+/** A fresh pin or other local edit may sync again. Generation is left alone. */
+export function resumeSyncOnRevision(state: SyncHaltState, createIdentity: boolean): SyncHaltState {
+  return {
+    generation: state.generation,
+    retryAttempt: state.retryAttempt,
+    allowCreate: createIdentity,
+    halted: false,
+  };
+}
+
+export function mayCreateIdentity(createIdentity: boolean, allowCreate: boolean): boolean {
+  return createIdentity && allowCreate;
+}
+
+/** A write started at `startedGeneration` may land only while that generation is current. */
+export function inFlightMayWrite(startedGeneration: number, currentGeneration: number): boolean {
+  return startedGeneration === currentGeneration;
+}
+
+export type StaleWriteRollback = {
+  undoWall: boolean;
+  undoUser: boolean;
+  noteSynced: boolean;
+  scheduleRetry: boolean;
+};
+
+/**
+ * A save that started before delete or sign-out must not count as synced and
+ * must not schedule another retry. Delete also removes a wall doc that
+ * transaction already recreated. Sign-out leaves an existing account's wall
+ * in place, and deletes a user only when this attempt created it.
+ */
+export function rollbackStaleWrite(input: {
+  reason: AbandonReason | null;
+  createdUserHere: boolean;
+  wrote: boolean;
+}): StaleWriteRollback {
+  const undoUser = input.createdUserHere;
+  return {
+    undoUser,
+    undoWall: input.reason === "delete" ? input.wrote || undoUser : undoUser,
+    noteSynced: false,
+    scheduleRetry: false,
+  };
 }
 
 export function planInitialMerge(input: {

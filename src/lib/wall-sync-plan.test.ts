@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   classifySyncFailure,
+  haltSync,
+  inFlightMayWrite,
+  mayCreateIdentity,
   planInitialMerge,
   planWallWrite,
+  resumeSyncOnRevision,
+  rollbackStaleWrite,
   syncFailureNotice,
   syncRetryDelayMs,
 } from "./wall-sync-plan.ts";
@@ -100,5 +105,115 @@ describe("sync failure during a rules lag", () => {
     assert.equal(syncRetryDelayMs(3), 45_000);
     assert.equal(syncRetryDelayMs(4), 60_000);
     assert.equal(syncRetryDelayMs(9), 60_000);
+  });
+});
+
+describe("delete while a sync retry is pending", () => {
+  it("does not create an account when the pending retry fires", () => {
+    const halted = haltSync({
+      generation: 4,
+      allowCreate: true,
+      retryAttempt: 2,
+      halted: false,
+    });
+    assert.equal(halted.generation, 5);
+    assert.equal(halted.allowCreate, false);
+    assert.equal(halted.retryAttempt, 0);
+    assert.equal(halted.halted, true);
+    // The page can still be holding createIdentity from the pin that was rejected.
+    // The retry used to coerce revision to 1 and call signInAnonymously.
+    assert.equal(
+      planWallWrite({
+        ...base,
+        hasUser: false,
+        createIdentity: mayCreateIdentity(true, halted.allowCreate),
+        revision: 1,
+        halted: halted.halted,
+      }),
+      "local-only",
+    );
+    assert.equal(
+      planWallWrite({
+        ...base,
+        hasUser: true,
+        createIdentity: true,
+        revision: 1,
+        halted: true,
+      }),
+      "local-only",
+    );
+  });
+
+  it("ignores a save that started before delete and rolls a recreated wall back", () => {
+    const started = 4;
+    const halted = haltSync({
+      generation: started,
+      allowCreate: true,
+      retryAttempt: 1,
+      halted: false,
+    });
+    assert.equal(inFlightMayWrite(started, halted.generation), false);
+    const rollback = rollbackStaleWrite({
+      reason: "delete",
+      createdUserHere: false,
+      wrote: true,
+    });
+    assert.equal(rollback.undoWall, true);
+    assert.equal(rollback.undoUser, false);
+    assert.equal(rollback.noteSynced, false);
+    assert.equal(rollback.scheduleRetry, false);
+
+    const createdDuringDelete = rollbackStaleWrite({
+      reason: "delete",
+      createdUserHere: true,
+      wrote: true,
+    });
+    assert.equal(createdDuringDelete.undoWall, true);
+    assert.equal(createdDuringDelete.undoUser, true);
+    assert.equal(createdDuringDelete.scheduleRetry, false);
+  });
+
+  it("cancels the same in-flight save on sign-out without deleting an existing wall", () => {
+    const started = 2;
+    const halted = haltSync({
+      generation: started,
+      allowCreate: true,
+      retryAttempt: 1,
+      halted: false,
+    });
+    assert.equal(inFlightMayWrite(started, halted.generation), false);
+    const rollback = rollbackStaleWrite({
+      reason: "sign-out",
+      createdUserHere: false,
+      wrote: true,
+    });
+    assert.equal(rollback.undoWall, false);
+    assert.equal(rollback.undoUser, false);
+    assert.equal(rollback.noteSynced, false);
+    assert.equal(rollback.scheduleRetry, false);
+  });
+
+  it("creates an account again only after a fresh pin", () => {
+    const halted = haltSync({
+      generation: 1,
+      allowCreate: true,
+      retryAttempt: 3,
+      halted: false,
+    });
+    const afterPin = resumeSyncOnRevision(halted, true);
+    assert.equal(afterPin.halted, false);
+    assert.equal(afterPin.allowCreate, true);
+    assert.equal(afterPin.generation, halted.generation);
+    assert.equal(
+      planWallWrite({
+        ...base,
+        hasUser: false,
+        createIdentity: mayCreateIdentity(true, afterPin.allowCreate),
+        revision: 2,
+        halted: afterPin.halted,
+      }),
+      "create-and-push",
+    );
+    assert.equal(inFlightMayWrite(afterPin.generation, afterPin.generation), true);
   });
 });

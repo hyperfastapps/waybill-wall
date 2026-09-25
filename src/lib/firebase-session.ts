@@ -32,6 +32,11 @@ import { wallAuthInitOptions } from "@/lib/firebase-auth-persistence";
 import { parseEmulatorHost, type FirebaseClientConfig } from "@/lib/firebase-config";
 import { syncedTrackingKeys, type MergeResult } from "@/lib/wall-merge";
 import { type Slip } from "@/lib/wall-codec";
+import {
+  inFlightMayWrite,
+  rollbackStaleWrite,
+  type AbandonReason,
+} from "@/lib/wall-sync-plan";
 
 export function openWallAuth(app: FirebaseApp): Auth {
   try {
@@ -67,6 +72,8 @@ export type FirebaseSession = {
   current(): WallUser | null;
   subscribe(listener: (user: WallUser | null) => void): () => void;
   isCreatingUser(): boolean;
+  /** Cancel lazy sign-up and any save already running. Clears the pending-sync flag. */
+  abandonWrites(reason: AbandonReason): void;
   push(readSlips: () => Slip[], createIdentity: boolean): Promise<MergeResult | null>;
   merge(mode: "local-wins" | "account-wins", localSlips: Slip[]): Promise<MergeResult | null>;
   linkGoogle(): Promise<void>;
@@ -145,8 +152,10 @@ function openFirestore(app: ReturnType<typeof getApp>, emulator: boolean): Fires
 
 function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): FirebaseSession {
   let epoch = 0;
+  let writeGeneration = 0;
   let creatingUser = false;
   let anonInflight: Promise<User> | null = null;
+  const haltedReasons = new Map<number, AbandonReason>();
 
   function ensureAnonymous(): Promise<User> {
     if (auth.currentUser) return Promise.resolve(auth.currentUser);
@@ -158,6 +167,45 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
     return anonInflight;
   }
 
+  function abandonWrites(reason: AbandonReason) {
+    haltedReasons.set(writeGeneration, reason);
+    writeGeneration += 1;
+    epoch += 1;
+    creatingUser = false;
+    storageRemove(PENDING_SYNC);
+  }
+
+  function stillCurrent(token: number, generation: number) {
+    return token === epoch && inFlightMayWrite(generation, writeGeneration);
+  }
+
+  async function undoStaleWrite(
+    user: User,
+    generation: number,
+    createdUserHere: boolean,
+    wrote: boolean,
+  ) {
+    const decision = rollbackStaleWrite({
+      reason: haltedReasons.get(generation) ?? null,
+      createdUserHere,
+      wrote,
+    });
+    if (decision.undoWall || decision.undoUser) {
+      try {
+        await deleteDoc(doc(db, "walls", user.uid));
+      } catch {
+        /* already gone, or the auth user is already deleted */
+      }
+    }
+    if (decision.undoUser) {
+      try {
+        await deleteUser(user);
+      } catch {
+        /* delete already removed this account */
+      }
+    }
+  }
+
   return {
     startup,
     current: () => snapshot(auth.currentUser),
@@ -165,15 +213,25 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
       return onAuthStateChanged(auth, (user) => listener(snapshot(user)));
     },
     isCreatingUser: () => creatingUser,
+    abandonWrites,
     async push(readSlips, createIdentity) {
+      const generation = writeGeneration;
+      if (!inFlightMayWrite(generation, writeGeneration)) return null;
       if (createIdentity) creatingUser = true;
       const token = ++epoch;
+      let createdHere = false;
+      let wrote = false;
+      let user = auth.currentUser;
       try {
-        let user = auth.currentUser;
+        if (!stillCurrent(token, generation)) return null;
         if (!user && (createIdentity || creatingUser)) {
           user = await ensureAnonymous();
+          createdHere = true;
         }
-        if (!user || token !== epoch) return null;
+        if (!user || !stillCurrent(token, generation)) {
+          if (createdHere && user) await undoStaleWrite(user, generation, true, false);
+          return null;
+        }
         const merged = await commitReconciledWall(
           db,
           user.uid,
@@ -181,19 +239,30 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
           "local-wins",
           readSyncedKeys(),
         );
-        if (token !== epoch) return null;
+        wrote = true;
+        if (!stillCurrent(token, generation)) {
+          await undoStaleWrite(user, generation, createdHere, true);
+          return null;
+        }
         noteSynced(merged.slips);
         creatingUser = false;
         return merged;
       } catch (error) {
-        if (token === epoch) creatingUser = false;
-        throw error;
+        if (stillCurrent(token, generation)) {
+          creatingUser = false;
+          throw error;
+        }
+        if (user && (createdHere || wrote)) {
+          await undoStaleWrite(user, generation, createdHere, wrote);
+        }
+        return null;
       }
     },
     async merge(mode, localSlips) {
+      const generation = writeGeneration;
       const token = epoch;
       const user = auth.currentUser;
-      if (!user) return null;
+      if (!user || !inFlightMayWrite(generation, writeGeneration)) return null;
       const merged = await commitReconciledWall(
         db,
         user.uid,
@@ -201,7 +270,10 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
         mode,
         mode === "local-wins" ? readSyncedKeys() : null,
       );
-      if (token !== epoch) return null;
+      if (!stillCurrent(token, generation)) {
+        await undoStaleWrite(user, generation, false, true);
+        return null;
+      }
       noteSynced(merged.slips);
       return merged;
     },
@@ -220,11 +292,16 @@ function bindSession(auth: Auth, db: Firestore, startup: SessionStartup): Fireba
       storageRemove(PENDING_SYNC);
     },
     async signOut() {
+      abandonWrites("sign-out");
       await firebaseSignOut(auth);
     },
     async deleteAccount() {
+      abandonWrites("delete");
       const user = auth.currentUser;
-      if (!user) return "deleted";
+      if (!user) {
+        clearSyncedKeys();
+        return "deleted";
+      }
       await deleteDoc(doc(db, "walls", user.uid));
       clearSyncedKeys();
       try {

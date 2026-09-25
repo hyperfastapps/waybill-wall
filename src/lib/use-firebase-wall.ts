@@ -2,10 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FirebaseClientConfig } from "@/lib/firebase-config";
 import {
   classifySyncFailure,
+  haltSync,
+  mayCreateIdentity,
   planInitialMerge,
   planWallWrite,
+  resumeSyncOnRevision,
   syncFailureNotice,
   syncRetryDelayMs,
+  type AbandonReason,
 } from "@/lib/wall-sync-plan";
 import { sameSlipContent } from "@/lib/wall-merge";
 import type { Slip } from "@/lib/wall-codec";
@@ -55,7 +59,31 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
   const createIdentityRef = useRef(createIdentity);
-  createIdentityRef.current = createIdentity;
+  const revisionSeen = useRef(revision);
+  const allowCreateRef = useRef(createIdentity);
+  const haltedRef = useRef(false);
+  const syncGeneration = useRef(0);
+  if (revisionSeen.current !== revision) {
+    revisionSeen.current = revision;
+    // Only a new pin (or adopting a share) may create an account after delete
+    // or sign-out. Clearing or removing a slip bumps revision too, and must
+    // leave the halt in place.
+    if (createIdentity) {
+      const resumed = resumeSyncOnRevision(
+        {
+          generation: syncGeneration.current,
+          allowCreate: allowCreateRef.current,
+          retryAttempt: 0,
+          halted: haltedRef.current,
+        },
+        true,
+      );
+      allowCreateRef.current = resumed.allowCreate;
+      haltedRef.current = resumed.halted;
+    }
+  }
+  if (!createIdentity) allowCreateRef.current = false;
+  createIdentityRef.current = mayCreateIdentity(createIdentity, allowCreateRef.current);
 
   const [user, setUser] = useState<WallUser | null>(null);
   const [busy, setBusy] = useState(false);
@@ -104,6 +132,28 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     setSyncDetail(null);
   }, [clearRetry]);
 
+  const stopSync = useCallback(
+    (reason: AbandonReason) => {
+      const halted = haltSync({
+        generation: syncGeneration.current,
+        allowCreate: allowCreateRef.current,
+        retryAttempt: retryAttempt.current,
+        halted: haltedRef.current,
+      });
+      syncGeneration.current = halted.generation;
+      allowCreateRef.current = halted.allowCreate;
+      retryAttempt.current = halted.retryAttempt;
+      haltedRef.current = halted.halted;
+      createIdentityRef.current = false;
+      failureNoted.current = false;
+      clearRetry();
+      sessionRef.current?.abandonWrites(reason);
+      setSync("local");
+      setSyncDetail(null);
+    },
+    [clearRetry],
+  );
+
   const scheduleRetry = useCallback(() => {
     clearRetry();
     retryAttempt.current += 1;
@@ -137,13 +187,16 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   useEffect(() => {
     if (!config || !ready || suspended) return;
     let cancel = false;
+    const generation = syncGeneration.current;
     pushChain.current = pushChain.current
       .catch(() => undefined)
       .then(async () => {
-        if (cancel || suspendedRef.current) return;
+        if (cancel || suspendedRef.current || haltedRef.current) return;
+        if (generation !== syncGeneration.current) return;
         try {
           const session = await load(config);
-          if (cancel || suspendedRef.current) return;
+          if (cancel || suspendedRef.current || haltedRef.current) return;
+          if (generation !== syncGeneration.current) return;
           sessionRef.current = session;
           const startup = session.startup;
           if (startup.deleted) {
@@ -172,7 +225,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
           });
           if (plan === "skip") return;
           const merged = await session.merge("local-wins", slipsRef.current);
-          if (cancel || !merged) return;
+          if (cancel || haltedRef.current || generation !== syncGeneration.current || !merged) return;
           adoptSlips(merged.slips);
           if (merged.dropped.length > 0) {
             publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
@@ -181,7 +234,8 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
         } catch (error: unknown) {
           // A rejected read-merge must not replace the phone wall, and the retry
           // below has to merge again. A blind upload would drop other devices.
-          if (!cancel) {
+          // Delete and sign-out must not schedule that retry.
+          if (!cancel && !haltedRef.current && generation === syncGeneration.current) {
             noteFailure(error);
             scheduleRetry();
           }
@@ -194,26 +248,29 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
 
   useEffect(() => {
     if (!config || !ready || (revision <= 0 && retryTick <= 0)) return;
-    const identity = createIdentityRef.current;
+    if (haltedRef.current) return;
+    const generation = syncGeneration.current;
     pushChain.current = pushChain.current
       .catch(() => undefined)
       .then(async () => {
+        if (haltedRef.current || generation !== syncGeneration.current) return;
         try {
           const session = await load(config);
+          if (haltedRef.current || generation !== syncGeneration.current) return;
           sessionRef.current = session;
           const creating = session.isCreatingUser();
+          const identity = mayCreateIdentity(createIdentityRef.current, allowCreateRef.current);
           const plan = planWallWrite({
             configured: true,
             suspended: suspendedRef.current,
-            hasUser: session.current() !== null || creating,
-            createIdentity: identity || creating,
+            hasUser: session.current() !== null || (creating && identity),
+            createIdentity: identity,
             revision: revision > 0 ? revision : 1,
+            halted: haltedRef.current,
           });
           if (plan === "skip" || plan === "local-only") return;
-          const merged = await session.push(
-            () => slipsHolder.current,
-            plan === "create-and-push" || identity,
-          );
+          const merged = await session.push(() => slipsHolder.current, plan === "create-and-push");
+          if (haltedRef.current || generation !== syncGeneration.current) return;
           if (merged) {
             adoptSlips(merged.slips);
             if (merged.dropped.length > 0) {
@@ -222,6 +279,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
           }
           markSaved();
         } catch (error: unknown) {
+          if (haltedRef.current || generation !== syncGeneration.current) return;
           noteFailure(error);
           scheduleRetry();
         }
@@ -259,7 +317,11 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     if (!config) return;
     setBusy(true);
     try {
+      stopSync("sign-out");
+      await pushChain.current.catch(() => undefined);
+      await pushChain.current.catch(() => undefined);
       const session = sessionRef.current ?? (await load(config));
+      session.abandonWrites("sign-out");
       await session.signOut();
       setSync("local");
     } finally {
@@ -271,11 +333,16 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     if (!config) return;
     setBusy(true);
     try {
+      stopSync("delete");
+      await pushChain.current.catch(() => undefined);
+      await pushChain.current.catch(() => undefined);
       const session = sessionRef.current ?? (await load(config));
+      session.abandonWrites("delete");
       const result = await session.deleteAccount();
       if (result === "deleted") {
         onSlipsRef.current([]);
         setSync("local");
+        setSyncDetail(null);
         publishNotice("Deleted the saved wall and the Firebase account.");
       }
     } finally {
