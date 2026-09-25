@@ -10,3 +10,5 @@ attachments
 .env
 .env.*
 !.env.example
+*-debug.log
+.firebase
