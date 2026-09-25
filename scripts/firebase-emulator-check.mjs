@@ -109,6 +109,14 @@ const reloaded = await getDoc(doc(owner.db, "walls", ownerCred.user.uid));
 assert.equal(reloaded.exists(), true);
 assert.equal(reloaded.data().slips[0].number, "1Z999AA10123456784");
 
+const full = Array.from({ length: 12 }, (_, index) =>
+  slip(`9400111899223${String(index).padStart(5, "0")}`, `N${index}`),
+);
+await setDoc(ownerRef, wall(full));
+const fullSaved = await getDoc(ownerRef);
+assert.equal(fullSaved.data().slips.length, 12);
+await setDoc(ownerRef, wall(slips));
+
 await expectDeny(getDoc(doc(other.db, "walls", ownerCred.user.uid)));
 await expectDeny(setDoc(doc(other.db, "walls", ownerCred.user.uid), wall(slips)));
 

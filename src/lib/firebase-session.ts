@@ -90,7 +90,7 @@ export function loadFirebaseSession(
  * Google sign-in uses a full-page redirect, not a popup. Android Chrome and an
  * installed PWA often drop `window.open`, and third-party storage partitions
  * the default `firebaseapp.com` auth handler. The app domain proxies
- * `/__/auth/*` (see `scripts/firebase-auth-proxy.mjs`), so set
+ * `/__/auth/*` (see `src/lib/firebase-auth-proxy.ts`), so set
  * `VITE_FIREBASE_AUTH_DOMAIN` to this site (waybill-wall.vercel.app) and the
  * handler stays first-party.
  */

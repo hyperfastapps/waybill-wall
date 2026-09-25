@@ -12,7 +12,7 @@ import {
   isFirebaseAuthPath,
   proxyFirebaseHostingRequest,
   readFirebaseProjectId,
-} from "./src/lib/firebase-auth-proxy";
+} from "./src/lib/firebase-auth-proxy.ts";
 
 /**
  * `/auth/popup` stays intercepted so a React route cannot paint the app shell

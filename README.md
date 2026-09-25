@@ -32,7 +32,7 @@ Local emulators only (do not set these on Vercel):
 
 ### What is stored
 
-`walls/{uid}` is readable and writable only by that Firebase user (`request.auth.uid`). Each document is `{ slips, updatedAt }`. A slip is `id`, `number` (8–40 letters or digits), `nickname` (≤ 40), `caption` (≤ 140), and `carrier` (`usps`, `ups`, `fedex`, `dhl`, `hdx`, `ontrac`). At most 12 slips.
+`walls/{uid}` is readable and writable only by that Firebase user (`request.auth.uid`). Each document is `{ slips, updatedAt }`. A slip is `id`, `number` (8–40 letters or digits), `nickname` (≤ 40), `caption` (≤ 140), and `carrier` (`usps`, `ups`, `fedex`, `dhl`, `hdx`, `ontrac`). At most 12 slips. The rules check the owner, the 12-slip cap, those lengths, and the carrier id. Tracking-number characters are checked in the app: a second pattern on every slip exceeds Firestore’s 1000-expression limit.
 
 Pinning is instant and writes `localStorage` first. Firestore updates in the background, including when the browser is offline (the Firestore SDK queues the write). An existing local wall is uploaded on the first sync, which happens on the first pin or when you choose “Save my wall to Google”.
 
