@@ -2,7 +2,7 @@
 
 Pin a tracking number, guess the shipper, and share the slip. The app does not sign into a carrier.
 
-Carriers: USPS, UPS, FedEx, DHL, HDX, OnTrac.
+Carriers: USPS, UPS, FedEx, DHL, HDX, OnTrac, Amazon.
 
 Without Firebase configured, the wall stays in this browser (`localStorage`) and in the share link (`#w=`). It keeps the numbers, shipper, and captions you type.
 
@@ -12,14 +12,14 @@ With the Firebase env vars below, pinning also creates an anonymous Firebase use
 
 Set these `VITE_` variables for the client. If any of them is missing, the app stays local-only: no auth UI, no Firebase calls.
 
-| Variable                            | Required     | Production value                                      |
-| ----------------------------------- | ------------ | ----------------------------------------------------- |
-| `VITE_FIREBASE_API_KEY`             | for Firebase | Already set on Vercel. Leave it.                      |
-| `VITE_FIREBASE_AUTH_DOMAIN`         | for Firebase | **Change to** `waybill-wall.vercel.app`               |
-| `VITE_FIREBASE_PROJECT_ID`          | for Firebase | `waybill-wall`                                        |
+| Variable                            | Required     | Production value                                               |
+| ----------------------------------- | ------------ | -------------------------------------------------------------- |
+| `VITE_FIREBASE_API_KEY`             | for Firebase | Already set on Vercel. Leave it.                               |
+| `VITE_FIREBASE_AUTH_DOMAIN`         | for Firebase | **Change to** `waybill-wall.vercel.app`                        |
+| `VITE_FIREBASE_PROJECT_ID`          | for Firebase | `waybill-wall`                                                 |
 | `VITE_FIREBASE_STORAGE_BUCKET`      | for Firebase | `waybill-wall.firebasestorage.app` (wall does not use Storage) |
-| `VITE_FIREBASE_MESSAGING_SENDER_ID` | for Firebase | `475380620738`                                        |
-| `VITE_FIREBASE_APP_ID`              | for Firebase | `1:475380620738:web:e080a1baef35c700e18a5b`           |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | for Firebase | `475380620738`                                                 |
+| `VITE_FIREBASE_APP_ID`              | for Firebase | `1:475380620738:web:e080a1baef35c700e18a5b`                    |
 
 Copy [`.env.example`](.env.example) to `.env.local` for local work. Vite inlines `VITE_*` at build time, so change them in the Vercel project and redeploy.
 
@@ -32,9 +32,11 @@ Local emulators only (do not set these on Vercel):
 
 ### What is stored
 
-`walls/{uid}` is readable and writable only by that Firebase user (`request.auth.uid`). Each document is `{ slips, updatedAt }`. A slip is `id`, `number` (8–40 letters or digits), `nickname` (≤ 40), `caption` (≤ 140), and `carrier` (`usps`, `ups`, `fedex`, `dhl`, `hdx`, `ontrac`). At most 12 slips. The rules check the owner, the 12-slip cap, those lengths, and the carrier id. Tracking-number characters are checked in the app: a second pattern on every slip exceeds Firestore’s 1000-expression limit.
+`walls/{uid}` is readable and writable only by that Firebase user (`request.auth.uid`). Each document is `{ slips, updatedAt }`. A slip is `id`, `number` (8–40 letters or digits), `nickname` (≤ 40), `caption` (≤ 140), and `carrier` (`usps`, `ups`, `fedex`, `dhl`, `hdx`, `ontrac`, `amazon`). At most 12 slips. The rules check the owner, the 12-slip cap, those lengths, and the carrier id. Tracking-number characters are checked in the app: a second pattern on every slip exceeds Firestore’s 1000-expression limit.
 
 Pinning is instant and writes `localStorage` first. Firestore updates in the background, including when the browser is offline (the Firestore SDK queues the write). An existing local wall is uploaded on the first sync, which happens on the first pin or when you choose “Save my wall to Google”.
+
+Amazon slips use carrier `amazon`. Publish `firestore.rules` before or with the app that writes that value. If the app is live first, Firestore rejects the whole wall document (the previous saved wall stays on the server). The phone keeps every slip, including the new Amazon one, shows that cloud sync will retry, and uploads the same wall once the rules allow `amazon`. A rejected sync does not clear the wall or replace it with the older server copy.
 
 Google sign-in uses a redirect, not a popup, so it can finish in Android Chrome and in the installed PWA. The app serves Firebase’s `/__/auth/*` and `/__/firebase/*` handler from its own domain (a reverse proxy to `https://waybill-wall.firebaseapp.com`). That only works when `VITE_FIREBASE_AUTH_DOMAIN` is the site itself, `waybill-wall.vercel.app`.
 

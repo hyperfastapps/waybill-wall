@@ -72,9 +72,9 @@ export function PrivacyDetails() {
         clears the slips on this phone.
       </p>
       <p>
-        The app still does not sign into USPS, UPS, FedEx, DHL, HDX, or OnTrac. Opening a carrier
-        follows their site. If the server has FedEx credentials, checking a FedEx slip sends that
-        tracking number to FedEx’s Track API.
+        The app still does not sign into USPS, UPS, FedEx, DHL, HDX, OnTrac, or Amazon. Opening a
+        carrier follows their site. If the server has FedEx credentials, checking a FedEx slip sends
+        that tracking number to FedEx’s Track API.
       </p>
     </div>
   );
@@ -90,8 +90,8 @@ export function LocalPrivacyDetails() {
         Firestore, and no Firebase ID is created.
       </p>
       <p>
-        The app does not sign into USPS, UPS, FedEx, DHL, HDX, or OnTrac. If the server has FedEx
-        credentials, checking a FedEx slip sends that tracking number to FedEx’s Track API.
+        The app does not sign into USPS, UPS, FedEx, DHL, HDX, OnTrac, or Amazon. If the server has
+        FedEx credentials, checking a FedEx slip sends that tracking number to FedEx’s Track API.
       </p>
     </div>
   );

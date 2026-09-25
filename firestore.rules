@@ -17,7 +17,7 @@ service cloud.firestore {
         && s.nickname.size() <= 40
         && s.caption is string
         && s.caption.size() <= 140
-        && s.carrier.matches('usps|ups|fedex|dhl|hdx|ontrac');
+        && s.carrier.matches('usps|ups|fedex|dhl|hdx|ontrac|amazon');
     }
 
     function slipsOk(slips) {

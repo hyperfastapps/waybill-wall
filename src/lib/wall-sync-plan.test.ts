@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { planInitialMerge, planWallWrite } from "./wall-sync-plan.ts";
+import {
+  classifySyncFailure,
+  planInitialMerge,
+  planWallWrite,
+  syncFailureNotice,
+  syncRetryDelayMs,
+} from "./wall-sync-plan.ts";
 
 const base = {
   configured: true,
@@ -71,5 +77,28 @@ describe("planInitialMerge", () => {
       }),
       "skip",
     );
+  });
+});
+
+describe("sync failure during a rules lag", () => {
+  it("treats a rules rejection as a retryable sync, not an offline failure", () => {
+    const rejected = classifySyncFailure({ code: "permission-denied" });
+    assert.equal(rejected, "rejected");
+    assert.match(syncFailureNotice(rejected), /Saved on this phone/);
+    assert.match(syncFailureNotice(rejected), /retry/);
+    assert.equal(
+      classifySyncFailure(new Error("Missing or insufficient permissions.")),
+      "rejected",
+    );
+    assert.equal(classifySyncFailure(new Error("Failed to fetch")), "transient");
+    assert.match(syncFailureNotice("transient"), /back online/);
+  });
+
+  it("backs off instead of hammering a rejected write", () => {
+    assert.equal(syncRetryDelayMs(1), 5_000);
+    assert.equal(syncRetryDelayMs(2), 15_000);
+    assert.equal(syncRetryDelayMs(3), 45_000);
+    assert.equal(syncRetryDelayMs(4), 60_000);
+    assert.equal(syncRetryDelayMs(9), 60_000);
   });
 });

@@ -1,4 +1,4 @@
-export const CARRIER_IDS = ["usps", "ups", "fedex", "dhl", "hdx", "ontrac"] as const;
+export const CARRIER_IDS = ["usps", "ups", "fedex", "dhl", "hdx", "ontrac", "amazon"] as const;
 
 export type CarrierId = (typeof CARRIER_IDS)[number];
 
@@ -20,6 +20,7 @@ export const CARRIERS: Carrier[] = [
   { id: "dhl", name: "DHL", perDay: "" },
   { id: "hdx", name: "HDX", perDay: "" },
   { id: "ontrac", name: "OnTrac", perDay: "" },
+  { id: "amazon", name: "Amazon", perDay: "" },
 ];
 
 export function isCarrierId(value: string): value is CarrierId {
@@ -47,7 +48,19 @@ export function trackUrl(id: CarrierId, number: string): string {
       return `http://www.hdxcn.com/cgi-bin/GInfo.dll?EmmisTrack&w=qdhuandao&cno=${encoded}`;
     case "ontrac":
       return `https://www.ontrac.com/tracking/?number=${encoded}`;
+    case "amazon":
+      // Amazon Shipping's public tracker. The path is the tracking id; no account login.
+      return `https://track.amazon.com/tracking/${encoded}`;
   }
+}
+
+/**
+ * Amazon Logistics / Amazon Shipping. TBA is the common Transportation Booking
+ * id (TBA + 12 digits). TBC and TBM are the same family on some routes.
+ */
+export function isAmazonNumber(raw: string): boolean {
+  const number = raw.replace(/[\s-]/g, "").toUpperCase();
+  return /^(TBA|TBC|TBM)\d{12}$/.test(number);
 }
 
 export function isTrackingNumber(number: string): boolean {
@@ -96,6 +109,8 @@ export function guessCarrier(raw: string): CarrierId {
   // Newer numeric barcodes are 20 digits and zero-padded (at least four leading zeros).
   // FedEx door tags of the same length do not lead with zeros, so they keep their score.
   if (/^0{4}\d{16}$/.test(number)) add("ontrac", 92);
+
+  if (isAmazonNumber(number)) add("amazon", 100);
 
   let best: CarrierId = "usps";
   let bestScore = 0;

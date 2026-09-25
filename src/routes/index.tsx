@@ -12,6 +12,7 @@ import {
   CARRIERS,
   carrierById,
   guessCarrier,
+  isAmazonNumber,
   isCarrierId,
   isTrackingNumber,
   trackUrl,
@@ -220,7 +221,8 @@ function Home() {
       /^\d{20,34}$/.test(cleaned) ||
       /^[CD]\d{14}$/i.test(cleaned) ||
       /^1LS[A-Z0-9]{5,}$/i.test(cleaned) ||
-      /^BN[A-Z0-9]{6,}$/i.test(cleaned);
+      /^BN[A-Z0-9]{6,}$/i.test(cleaned) ||
+      isAmazonNumber(cleaned);
     if (pasted || jumped || finished) guessNow(next);
   }
 
@@ -348,6 +350,7 @@ function Home() {
           uid={account.uid}
           busy={account.busy}
           sync={account.sync}
+          syncDetail={account.syncDetail}
           onGoogle={() => {
             void account.linkGoogle().catch((error: unknown) => {
               toast.error(authErrorText(error));

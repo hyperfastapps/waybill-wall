@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { FirebaseClientConfig } from "@/lib/firebase-config";
-import { planInitialMerge, planWallWrite } from "@/lib/wall-sync-plan";
+import {
+  classifySyncFailure,
+  planInitialMerge,
+  planWallWrite,
+  syncFailureNotice,
+  syncRetryDelayMs,
+} from "@/lib/wall-sync-plan";
 import { sameSlipContent } from "@/lib/wall-merge";
 import type { Slip } from "@/lib/wall-codec";
 import type { FirebaseSession, WallUser } from "@/lib/firebase-session";
@@ -14,6 +20,8 @@ export type FirebaseWallController = {
   uid: string | null;
   busy: boolean;
   sync: SyncState;
+  /** Set while sync is "error". The slips on screen are unchanged. */
+  syncDetail: string | null;
   notice: { id: number; text: string } | null;
   linkGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -45,11 +53,49 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   const [user, setUser] = useState<WallUser | null>(null);
   const [busy, setBusy] = useState(false);
   const [sync, setSync] = useState<SyncState>(config ? "local" : "off");
+  const [syncDetail, setSyncDetail] = useState<string | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
   const [notice, setNotice] = useState<{ id: number; text: string } | null>(null);
   const noticeId = useRef(0);
   const sessionRef = useRef<FirebaseSession | null>(null);
   const appliedStartup = useRef(false);
   const pushChain = useRef(Promise.resolve());
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryAttempt = useRef(0);
+  const failureNoted = useRef(false);
+
+  function clearRetry() {
+    if (retryTimer.current != null) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+  }
+
+  function noteFailure(error: unknown) {
+    const text = syncFailureNotice(classifySyncFailure(error));
+    setSync("error");
+    setSyncDetail(text);
+    if (failureNoted.current) return;
+    failureNoted.current = true;
+    publishNotice(text);
+  }
+
+  function markSaved() {
+    retryAttempt.current = 0;
+    failureNoted.current = false;
+    clearRetry();
+    setSync("saved");
+    setSyncDetail(null);
+  }
+
+  function scheduleRetry() {
+    clearRetry();
+    retryAttempt.current += 1;
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null;
+      setRetryTick((value) => value + 1);
+    }, syncRetryDelayMs(retryAttempt.current));
+  }
 
   function publishNotice(text: string | null) {
     if (!text) return;
@@ -103,7 +149,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
             }
             publishNotice(startup.notice);
           }
-          setSync("saved");
+          markSaved();
           return;
         }
         const plan = planInitialMerge({
@@ -119,10 +165,14 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
         if (merged.dropped.length > 0) {
           publishNotice("Some slips from another device didn’t fit on the 12-slip wall.");
         }
-        setSync("saved");
+        markSaved();
       })
-      .catch(() => {
-        if (!cancel) setSync("error");
+      .catch((error: unknown) => {
+        // A rejected write must not replace the slips on screen with the older server wall.
+        if (!cancel) {
+          noteFailure(error);
+          scheduleRetry();
+        }
       });
     return () => {
       cancel = true;
@@ -130,7 +180,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
   }, [config, ready, suspended]);
 
   useEffect(() => {
-    if (!config || !ready || revision <= 0) return;
+    if (!config || !ready || (revision <= 0 && retryTick <= 0)) return;
     const identity = createIdentityRef.current;
     pushChain.current = pushChain.current
       .catch(() => undefined)
@@ -143,17 +193,32 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
           suspended: suspendedRef.current,
           hasUser: session.current() !== null || creating,
           createIdentity: identity || creating,
-          revision,
+          revision: revision > 0 ? revision : 1,
         });
         if (plan === "skip" || plan === "local-only") return;
         await session.push(() => slipsHolder.current, plan === "create-and-push" || identity);
-        setSync("saved");
+        markSaved();
       })
-      .catch(() => {
-        setSync("error");
-        publishNotice("Saved on this phone. It will sync when you’re back online.");
+      .catch((error: unknown) => {
+        noteFailure(error);
+        scheduleRetry();
       });
-  }, [config, ready, revision]);
+  }, [config, ready, revision, retryTick]);
+
+  useEffect(() => {
+    if (!config) return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || retryAttempt.current === 0) return;
+      clearRetry();
+      setRetryTick((value) => value + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [config]);
+
+  useEffect(() => () => clearRetry(), []);
 
   async function linkGoogle() {
     if (!config) return;
@@ -202,6 +267,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
       uid: null,
       busy: false,
       sync: "off",
+      syncDetail: null,
       notice: null,
       linkGoogle: async () => {},
       signOut: async () => {},
@@ -216,6 +282,7 @@ export function useFirebaseWall(options: Options): FirebaseWallController {
     uid: user?.uid ?? null,
     busy,
     sync,
+    syncDetail,
     notice,
     linkGoogle,
     signOut,

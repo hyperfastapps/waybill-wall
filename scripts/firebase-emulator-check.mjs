@@ -102,6 +102,22 @@ const ownerRef = doc(owner.db, "walls", ownerCred.user.uid);
 const slips = [slip("1Z999AA10123456784", "Lamp")];
 await setDoc(ownerRef, wall(slips));
 
+const amazonSlip = {
+  id: "slip-TBA334894092403",
+  number: "TBA334894092403",
+  nickname: "Parcel · 2403",
+  caption: "emulator",
+  carrier: "amazon",
+};
+await setDoc(ownerRef, wall([amazonSlip, ...slips]));
+const withAmazon = await getDoc(ownerRef);
+assert.equal(withAmazon.data().slips.length, 2);
+assert.equal(withAmazon.data().slips[0].carrier, "amazon");
+assert.equal(withAmazon.data().slips[0].number, "TBA334894092403");
+assert.equal(withAmazon.data().slips[1].carrier, "ups");
+assert.equal(withAmazon.data().slips[1].number, "1Z999AA10123456784");
+await setDoc(ownerRef, wall(slips));
+
 const saved = await getDoc(ownerRef);
 assert.equal(saved.exists(), true);
 assert.equal(saved.data().slips[0].nickname, "Lamp");

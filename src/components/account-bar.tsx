@@ -8,12 +8,23 @@ type Props = {
   uid: string | null;
   busy: boolean;
   sync: string;
+  syncDetail: string | null;
   onGoogle: () => void;
   onSignOut: () => void;
   onDelete: () => void;
 };
 
-export function AccountBar({ mode, email, uid, busy, sync, onGoogle, onSignOut, onDelete }: Props) {
+export function AccountBar({
+  mode,
+  email,
+  uid,
+  busy,
+  sync,
+  syncDetail,
+  onGoogle,
+  onSignOut,
+  onDelete,
+}: Props) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const signedIn = mode === "anonymous" || mode === "google";
 
@@ -79,6 +90,11 @@ export function AccountBar({ mode, email, uid, busy, sync, onGoogle, onSignOut, 
             {confirmDelete ? "Confirm delete" : "Delete my data"}
           </button>
         </>
+      ) : null}
+      {sync === "error" && syncDetail ? (
+        <p className="w-full text-sm text-muted" data-testid="sync-detail">
+          {syncDetail}
+        </p>
       ) : null}
     </div>
   );
