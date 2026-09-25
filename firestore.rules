@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedInOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Keep each check cheap. Firestore evaluates at most 1000 expressions
+    // per request, and a 12-slip wall runs this once per slip.
+    function slipOk(s) {
+      return s.id is string
+        && s.id.size() <= 80
+        && s.number is string
+        && s.number.size() >= 8
+        && s.number.size() <= 40
+        && s.nickname is string
+        && s.nickname.size() <= 40
+        && s.caption is string
+        && s.caption.size() <= 140
+        && s.carrier.matches('usps|ups|fedex|dhl|hdx|ontrac');
+    }
+
+    function slipsOk(slips) {
+      return slips is list
+        && slips.size() <= 12
+        && (slips.size() < 1 || slipOk(slips[0]))
+        && (slips.size() < 2 || slipOk(slips[1]))
+        && (slips.size() < 3 || slipOk(slips[2]))
+        && (slips.size() < 4 || slipOk(slips[3]))
+        && (slips.size() < 5 || slipOk(slips[4]))
+        && (slips.size() < 6 || slipOk(slips[5]))
+        && (slips.size() < 7 || slipOk(slips[6]))
+        && (slips.size() < 8 || slipOk(slips[7]))
+        && (slips.size() < 9 || slipOk(slips[8]))
+        && (slips.size() < 10 || slipOk(slips[9]))
+        && (slips.size() < 11 || slipOk(slips[10]))
+        && (slips.size() < 12 || slipOk(slips[11]));
+    }
+
+    function wallOk(data) {
+      return data.keys().hasOnly(['slips', 'updatedAt'])
+        && slipsOk(data.slips)
+        && data.updatedAt is timestamp;
+    }
+
+    match /walls/{uid} {
+      allow read: if signedInOwner(uid);
+      // A single write rule stays inside Firestore's 1000-expression budget
+      // for 12 slips. Separate create and update rules count those checks twice.
+      allow write: if signedInOwner(uid)
+        && (request.method == 'delete' || wallOk(request.resource.data));
+    }
+  }
+}

@@ -1,4 +1,4 @@
-import { guessCarrier, isCarrierId, isTrackingNumber, type CarrierId } from "@/lib/carriers";
+import { guessCarrier, isCarrierId, isTrackingNumber, type CarrierId } from "./carriers.ts";
 
 export type Slip = {
   id: string;
@@ -8,7 +8,7 @@ export type Slip = {
   carrier: CarrierId;
 };
 
-const MAX_SLIPS = 12;
+export const MAX_SLIPS = 12;
 
 type Packed = { n: string; k: string; c: string; s?: string };
 
